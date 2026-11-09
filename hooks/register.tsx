@@ -32,6 +32,7 @@ import {
   setFollow,
   startPairing,
 } from './client'
+import { LOGO_PNG } from './logo'
 import { chooseCloneFolder, cloneRepo, cloneableUrl, inlinePluginDir, normRemote, openFolder, rememberClone, scanClones, takeJoinOnOpen, writeJoinOnOpen } from './launch'
 
 const EMPTY_CHAT: ChatView = {
@@ -1221,18 +1222,36 @@ async function restore($: Engine, mem: Mem) {
 function bandText(v: AuthView): string {
   switch (v.phase) {
     case 'signed-out':
-      return ' · Sign in'
+      return '  Sign in'
     case 'pairing':
-      return ` · code ${v.code} · approve at app.hiveop.io/claude-code`
+      return `  code ${v.code} · approve at app.hiveop.io/claude-code`
     case 'signed-in':
-      return ` · ${v.name ?? 'you'}`
+      return `  ${v.name ?? 'you'}`
     case 'ended':
-      return ` · ${ENDED_TEXT[v.reason]}`
+      return `  ${ENDED_TEXT[v.reason]}`
   }
 }
 
 // HiveOp brand cyan (app.hiveop.io accent).
 const BRAND = '#22D3EE'
+
+type Ui = Pick<Elements['terminal'], 'Box' | 'Text'>
+
+/** The pane's top line: the mark and name left, the session's seat right. */
+function paneHead(ui: Ui, right: string) {
+  const { Box, Text } = ui
+  return (
+    <Box justifyContent="space-between" paddingX={1}>
+      <Text bold color={BRAND}>⬡ HiveOp</Text>
+      <Text wrap="truncate-end">{right}</Text>
+    </Box>
+  )
+}
+
+/** A thin rule between the header, the body and the input. */
+function paneRule(ui: Ui, cols: number) {
+  return <ui.Text dimColor>{'─'.repeat(Math.max(8, cols))}</ui.Text>
+}
 
 export const register: Register = (on) => {
   const mem: Mem = { timer: null, pollToken: null, failures: 0, expiresAtMs: 0, chat: newChatMem() }
@@ -1328,37 +1347,50 @@ export const register: Register = (on) => {
     const wk = await read($, work)
     const st = await read($, seat)
     if (nv.band === 'hidden') return next(e)
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Button, Text } = ui
+    const Img = e.surface === 'terminal' ? (ui as Partial<Elements['terminal']>).Image : undefined
+    // Digits 1.. in the order drawn; plain buttons read `1: Chat`.
+    let n = 0
+    const hot = () => String(++n)
+    const signedIn = v.phase === 'signed-in'
     return (
-      <Box>
-        <Text wrap="truncate-end">
-          <Text color={BRAND} bold>HiveOp</Text>
-          {v.phase === 'signed-in' && st.seat
-            ? ` · ${oneLine(st.seat.workspaceName, 30)} · ${oneLine(st.seat.name, 30)}`
-            : v.phase === 'signed-in' && st.target
-              ? ` · ${oneLine(st.target.name, 30)} ·`
-              : bandText(v)}
-          {v.phase === 'signed-in' && !st.seat && st.folder === 'none' && ' · Not a workspace folder'}
-          {v.phase === 'signed-in' && st.note !== '' && ` · ${oneLine(st.note, 70)}`}
-          {v.phase === 'signed-in' && unreadTotal(c) > 0 && <Text bold color={BRAND}>{` · ${unreadTotal(c)} new`}</Text>}
-          {v.phase === 'signed-in' && st.seat && workText(wk)}
-          {v.phase === 'signed-in' && st.seat && wk.note !== '' && ` · ${oneLine(wk.note, 70)}`}
-        </Text>
-        {(v.phase === 'signed-out' || v.phase === 'ended') && (
-          <Button key="band-sign-in" label=" Sign in" onPress={() => void signIn($, mem)} />
-        )}
-        {v.phase === 'signed-in' && !st.seat && st.folder === 'mine' && st.target && (
-          <Button key="band-join" label={st.busy ? ' Joining…' : ' Join as agent'} variant="primary" onPress={() => void joinSeat($, st.target!)} />
-        )}
-        {v.phase === 'signed-in' && !st.seat && st.folder === 'joinable' && (
-          <Button key="band-request" label=" Request to join" onPress={() => void requestSeatAccess($)} />
-        )}
-        {v.phase === 'signed-in' && st.seat && <Button key="band-leave" label=" Leave" onPress={() => void leaveSeat($)} />}
-        {v.phase === 'signed-in' && <Button key="band-chat" label=" Chat" onPress={() => void showChat($)} />}
-        {v.phase === 'signed-in' && st.seat && wk.loaded && wk.ready > 0 && (
-          <Button key="band-claim" label={wk.claiming ? ' Claiming…' : ' Claim'} onPress={() => void claimNext($)} />
-        )}
-        <Button key="band-hide" label=" Hide" onPress={() => void setBand($, 'hidden')} />
+      <Box gap={2}>
+        <Box width={3}>
+          {Img ? <Img key="band-logo" source={{ png: LOGO_PNG }} columns={2} rows={1} alt="⬡" /> : <Text bold color={BRAND}>⬡</Text>}
+        </Box>
+        <Box flexGrow={1}>
+          <Text wrap="truncate-end">
+            <Text color={BRAND} bold>HiveOp</Text>
+            {signedIn && st.seat
+              ? `  ${oneLine(st.seat.workspaceName, 30)} · ${oneLine(st.seat.name, 30)}`
+              : signedIn && st.target
+                ? `  ${oneLine(st.target.name, 30)}`
+                : bandText(v)}
+            {signedIn && !st.seat && st.folder === 'none' && ' · Not a workspace folder'}
+            {signedIn && st.note !== '' && ` · ${oneLine(st.note, 70)}`}
+            {signedIn && unreadTotal(c) > 0 && <Text bold color={BRAND}>{` · ${unreadTotal(c)} new`}</Text>}
+            {signedIn && st.seat && workText(wk)}
+            {signedIn && st.seat && wk.note !== '' && ` · ${oneLine(wk.note, 70)}`}
+          </Text>
+        </Box>
+        <Box gap={2}>
+          {(v.phase === 'signed-out' || v.phase === 'ended') && (
+            <Button key="band-sign-in" label="Sign in" plain hotkey={hot()} onPress={() => void signIn($, mem)} />
+          )}
+          {signedIn && !st.seat && st.folder === 'mine' && st.target && (
+            <Button key="band-join" label={st.busy ? 'Joining…' : 'Join as agent'} plain hotkey={hot()} onPress={() => void joinSeat($, st.target!)} />
+          )}
+          {signedIn && !st.seat && st.folder === 'joinable' && (
+            <Button key="band-request" label="Request to join" plain hotkey={hot()} onPress={() => void requestSeatAccess($)} />
+          )}
+          {signedIn && <Button key="band-chat" label="Chat" plain hotkey={hot()} onPress={() => void showChat($)} />}
+          {signedIn && st.seat && <Button key="band-leave" label="Leave" plain hotkey={hot()} onPress={() => void leaveSeat($)} />}
+          {signedIn && st.seat && wk.loaded && wk.ready > 0 && (
+            <Button key="band-claim" label={wk.claiming ? 'Claiming…' : 'Claim'} plain hotkey={hot()} onPress={() => void claimNext($)} />
+          )}
+          <Button key="band-hide" label="Hide" plain hotkey={hot()} onPress={() => void setBand($, 'hidden')} />
+        </Box>
       </Box>
     )
   })
@@ -1369,90 +1401,107 @@ export const register: Register = (on) => {
     const nv = await read($, nav)
     const wk = await read($, work)
     const st = await read($, seat)
-    const { Box, Button, Input, Text } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Button, Input, Text } = ui
     // Image exists on the terminal surface only; everywhere else the initials stand in.
-    const Img = e.surface === 'terminal' ? ($.ui.resolve(e) as Partial<Elements['terminal']>).Image : undefined
+    const Img = e.surface === 'terminal' ? (ui as Partial<Elements['terminal']>).Image : undefined
     const ph = await read($, photos)
     if (v.phase === 'signed-in' && c.screen === 'chat') void ensurePhotos($)
-    const room = Math.max(3, (e.viewport?.rows ?? 24) - 9)
+    const cols = e.props.bodyColumns ?? 60
+    const rows = e.props.scroll?.bodyRows ?? e.viewport?.rows ?? 24
+    const room = Math.max(3, rows - 9)
+    const seatText = st.seat ? `${oneLine(st.seat.name, 30)} · joined` : v.phase === 'signed-in' ? (v.name ?? '') : ''
+    // A tab: bold cyan when active, normal colour otherwise.
+    const tab = (key: string, label: string, active: boolean, onPress: () => void) => (
+      <Button key={key} label={label} plain onPress={onPress}>
+        <Text bold={active} color={active ? BRAND : undefined}>{label}</Text>
+      </Button>
+    )
     if (v.phase === 'signed-in' && c.screen !== 'chat' && nv.screen === 'workspaces') {
       const ex = nv.explore
       return (
         <Box flexDirection="column">
-          <Box>
-            <Text bold color={BRAND}>Workspaces</Text>
-            <Button key="nav-back" label=" Back" onPress={() => void goTo($, 'home')} />
+          {paneHead(ui, seatText)}
+          <Box paddingX={1} gap={2}>
+            {tab('tab-mine', 'Mine', nv.tab === 'mine', () => void showTab($, 'mine'))}
+            {tab('tab-invites', nv.invites && nv.invites.length > 0 ? `Invites · ${nv.invites.length}` : 'Invites', nv.tab === 'invites', () => void showTab($, 'invites'))}
+            {tab('tab-explore', 'Explore', nv.tab === 'explore', () => void showTab($, 'explore'))}
+            <Box flexGrow={1} />
+            <Button key="nav-back" label="Back" plain onPress={() => void goTo($, 'home')} />
           </Box>
-          <Box>
-            <Button key="tab-mine" label="Mine" variant={nv.tab === 'mine' ? 'primary' : undefined} onPress={() => void showTab($, 'mine')} />
-            <Button
-              key="tab-invites"
-              label={nv.invites && nv.invites.length > 0 ? `Invites · ${nv.invites.length}` : 'Invites'}
-              variant={nv.tab === 'invites' ? 'primary' : undefined}
-              onPress={() => void showTab($, 'invites')}
-            />
-            <Button key="tab-explore" label="Explore" variant={nv.tab === 'explore' ? 'primary' : undefined} onPress={() => void showTab($, 'explore')} />
+          {paneRule(ui, cols)}
+          <Box flexDirection="column" paddingX={1}>
+            {nv.note !== '' && <Text bold>{nv.note}</Text>}
+            {nv.tab === 'mine' && nv.mine === null && <Text>Loading…</Text>}
+            {nv.tab === 'mine' && nv.mine !== null && nv.mine.length === 0 && <Text>No workspaces yet. Create one at app.hiveop.io.</Text>}
+            {nv.tab === 'mine' &&
+              (nv.mine ?? []).slice(0, room).map((w) => (
+                <Box justifyContent="space-between" gap={2}>
+                  <Text wrap="truncate-end">
+                    <Text bold>{w.name}</Text>
+                    {st.seat?.workspaceId === w.id ? '  joined' : ''}
+                    {' · your Claude plan'}
+                  </Text>
+                  <Box gap={2}>
+                    {(() => {
+                      const dir = nv.clones[normRemote(w.repoUrl)]
+                      if (st.seat?.workspaceId === w.id) return null
+                      if (st.folder === 'mine' && st.target?.id === w.id)
+                        return <Button key={`ws-code-${w.id}`} label="Code here" variant="primary" onPress={() => void joinSeat($, w)} />
+                      if (dir) return <Button key={`ws-open-${w.id}`} label="Open" variant="primary" onPress={() => void openRow($, w, dir, e.surface === 'terminal')} />
+                      if (w.kind === 'github' && cloneableUrl(w.repoUrl))
+                        return <Button key={`ws-get-${w.id}`} label="Get code" variant="primary" onPress={() => void getCode($, w, e.surface === 'terminal')} />
+                      return null
+                    })()}
+                    <Button key={`ws-chat-${w.id}`} label="Open chat" plain onPress={() => void openRoom($, w)} />
+                  </Box>
+                </Box>
+              ))}
+            {nv.tab === 'invites' && nv.invites === null && <Text>Loading…</Text>}
+            {nv.tab === 'invites' && nv.invites !== null && nv.invites.length === 0 && <Text>No invites.</Text>}
+            {nv.tab === 'invites' &&
+              (nv.invites ?? []).slice(0, room).map((i) => (
+                <Box justifyContent="space-between" gap={2}>
+                  <Text wrap="truncate-end" bold>{i.wsName}</Text>
+                  <Box gap={2}>
+                    <Button key={`inv-accept-${i.id}`} label="Accept" variant="primary" onPress={() => void answerInvite($, i, true)} />
+                    <Button key={`inv-decline-${i.id}`} label="Decline" plain onPress={() => void answerInvite($, i, false)} />
+                  </Box>
+                </Box>
+              ))}
+            {nv.tab === 'explore' && (
+              <Input
+                key="ex-search"
+                placeholder="Search public workspaces…"
+                value={ex.search}
+                submitLabel="search"
+                onInput={(t) => void setExploreText($, t)}
+                onSubmit={(t) => void loadExplore($, t.trim(), 0)}
+              />
+            )}
+            {nv.tab === 'explore' && !ex.loaded && <Text>Loading…</Text>}
+            {nv.tab === 'explore' && ex.loaded && ex.rows.length === 0 && <Text>No workspaces found.</Text>}
+            {nv.tab === 'explore' &&
+              ex.rows.map((w) => (
+                <Box justifyContent="space-between" gap={2}>
+                  <Text wrap="truncate-end">
+                    <Text bold>{w.name}</Text>
+                    {w.members !== null ? ` · ${w.members}` : ''}
+                  </Text>
+                  {(w.kind === 'github' || w.canJoin) && (
+                    <Button key={`ex-join-${w.id}`} label={w.kind === 'github' ? 'Join' : 'Request to join'} variant="primary" onPress={() => void joinRow($, w)} />
+                  )}
+                  {w.kind !== 'github' && !w.canJoin && <Text>closed</Text>}
+                </Box>
+              ))}
+            {nv.tab === 'explore' && ex.loaded && (ex.offset > 0 || ex.offset + ex.rows.length < ex.total) && (
+              <Box gap={2}>
+                {ex.offset > 0 && <Button key="ex-prev" label="Prev" plain onPress={() => void loadExplore($, ex.search, Math.max(0, ex.offset - PAGE))} />}
+                <Text>{`${ex.offset + 1}–${ex.offset + ex.rows.length} of ${ex.total}`}</Text>
+                {ex.offset + ex.rows.length < ex.total && <Button key="ex-next" label="Next" plain onPress={() => void loadExplore($, ex.search, ex.offset + PAGE)} />}
+              </Box>
+            )}
           </Box>
-          {nv.note !== '' && <Text bold>{nv.note}</Text>}
-          {nv.tab === 'mine' && nv.mine === null && <Text>Loading…</Text>}
-          {nv.tab === 'mine' && nv.mine !== null && nv.mine.length === 0 && <Text>No workspaces yet. Create one at app.hiveop.io.</Text>}
-          {nv.tab === 'mine' &&
-            (nv.mine ?? []).slice(0, room).map((w) => (
-              <Box>
-                <Text>{`${w.name} `}</Text>
-                {(() => {
-                  const dir = nv.clones[normRemote(w.repoUrl)]
-                  if (st.seat?.workspaceId === w.id) return <Text>{'Joined '}</Text>
-                  if (st.folder === 'mine' && st.target?.id === w.id)
-                    return <Button key={`ws-code-${w.id}`} label="Code here" variant="primary" onPress={() => void joinSeat($, w)} />
-                  if (dir) return <Button key={`ws-open-${w.id}`} label="Open" onPress={() => void openRow($, w, dir, e.surface === 'terminal')} />
-                  if (w.kind === 'github' && cloneableUrl(w.repoUrl))
-                    return <Button key={`ws-get-${w.id}`} label="Get code" onPress={() => void getCode($, w, e.surface === 'terminal')} />
-                  return null
-                })()}
-                <Text>{' your Claude plan '}</Text>
-                <Button key={`ws-chat-${w.id}`} label="Open chat" variant={c.tabs.some((t) => t.id === w.id) ? undefined : 'primary'} onPress={() => void openRoom($, w)} />
-              </Box>
-            ))}
-          {nv.tab === 'invites' && nv.invites === null && <Text>Loading…</Text>}
-          {nv.tab === 'invites' && nv.invites !== null && nv.invites.length === 0 && <Text>No invites.</Text>}
-          {nv.tab === 'invites' &&
-            (nv.invites ?? []).slice(0, room).map((i) => (
-              <Box>
-                <Text>{`${i.wsName} `}</Text>
-                <Button key={`inv-accept-${i.id}`} label="Accept" variant="primary" onPress={() => void answerInvite($, i, true)} />
-                <Button key={`inv-decline-${i.id}`} label="Decline" onPress={() => void answerInvite($, i, false)} />
-              </Box>
-            ))}
-          {nv.tab === 'explore' && (
-            <Input
-              key="ex-search"
-              placeholder="Search public workspaces…"
-              value={ex.search}
-              submitLabel="search"
-              onInput={(t) => void setExploreText($, t)}
-              onSubmit={(t) => void loadExplore($, t.trim(), 0)}
-            />
-          )}
-          {nv.tab === 'explore' && !ex.loaded && <Text>Loading…</Text>}
-          {nv.tab === 'explore' && ex.loaded && ex.rows.length === 0 && <Text>No workspaces found.</Text>}
-          {nv.tab === 'explore' &&
-            ex.rows.map((w) => (
-              <Box>
-                <Text>{`${w.name}${w.members !== null ? ` · ${w.members}` : ''} `}</Text>
-                {(w.kind === 'github' || w.canJoin) && (
-                  <Button key={`ex-join-${w.id}`} label={w.kind === 'github' ? 'Join' : 'Request to join'} onPress={() => void joinRow($, w)} />
-                )}
-                {w.kind !== 'github' && !w.canJoin && <Text>closed</Text>}
-              </Box>
-            ))}
-          {nv.tab === 'explore' && ex.loaded && (ex.offset > 0 || ex.offset + ex.rows.length < ex.total) && (
-            <Box>
-              {ex.offset > 0 && <Button key="ex-prev" label="Prev" onPress={() => void loadExplore($, ex.search, Math.max(0, ex.offset - PAGE))} />}
-              <Text>{` ${ex.offset + 1}–${ex.offset + ex.rows.length} of ${ex.total} `}</Text>
-              {ex.offset + ex.rows.length < ex.total && <Button key="ex-next" label="Next" onPress={() => void loadExplore($, ex.search, ex.offset + PAGE)} />}
-            </Box>
-          )}
         </Box>
       )
     }
@@ -1460,115 +1509,156 @@ export const register: Register = (on) => {
       const pp = nv.people
       return (
         <Box flexDirection="column">
-          <Box>
+          {paneHead(ui, seatText)}
+          <Box paddingX={1} gap={2}>
             <Text bold color={BRAND}>People</Text>
-            <Button key="nav-back" label=" Back" onPress={() => void goTo($, 'home')} />
+            <Box flexGrow={1} />
+            <Button key="nav-back" label="Back" plain onPress={() => void goTo($, 'home')} />
           </Box>
-          <Input
-            key="pp-search"
-            placeholder="Search pilots…"
-            value={pp.query}
-            submitLabel="search"
-            onInput={(t) => void setPeopleText($, t)}
-            onSubmit={(t) => void loadPeople($, t.trim(), 0)}
-          />
-          {nv.note !== '' && <Text bold>{nv.note}</Text>}
-          {!pp.loaded && <Text>Loading…</Text>}
-          {pp.loaded && pp.rows.length === 0 && <Text>No one found.</Text>}
-          {pp.rows.map((p) => (
-            <Box>
-              <Text>{`${p.name} `}</Text>
-              {pp.following.includes(p.wallet) ? (
-                <Button key={`pp-unfollow-${p.wallet}`} label="Unfollow" onPress={() => void toggleFollow($, p)} />
-              ) : (
-                <Button key={`pp-follow-${p.wallet}`} label="Follow" variant="primary" onPress={() => void toggleFollow($, p)} />
-              )}
-              {pp.following.includes(p.wallet) && <Text>{' · following'}</Text>}
-            </Box>
-          ))}
-          {pp.loaded && (pp.offset > 0 || pp.more) && (
-            <Box>
-              {pp.offset > 0 && <Button key="pp-prev" label="Prev" onPress={() => void loadPeople($, pp.query, Math.max(0, pp.offset - PAGE))} />}
-              {pp.more && <Button key="pp-next" label="Next" onPress={() => void loadPeople($, pp.query, pp.offset + PAGE)} />}
-            </Box>
-          )}
+          {paneRule(ui, cols)}
+          <Box flexDirection="column" paddingX={1}>
+            <Input
+              key="pp-search"
+              placeholder="Search pilots…"
+              value={pp.query}
+              submitLabel="search"
+              onInput={(t) => void setPeopleText($, t)}
+              onSubmit={(t) => void loadPeople($, t.trim(), 0)}
+            />
+            {nv.note !== '' && <Text bold>{nv.note}</Text>}
+            {!pp.loaded && <Text>Loading…</Text>}
+            {pp.loaded && pp.rows.length === 0 && <Text>No one found.</Text>}
+            {pp.rows.map((p) => (
+              <Box justifyContent="space-between" gap={2}>
+                <Text wrap="truncate-end">
+                  <Text bold>{p.name}</Text>
+                  {pp.following.includes(p.wallet) ? ' · following' : ''}
+                </Text>
+                {pp.following.includes(p.wallet) ? (
+                  <Button key={`pp-unfollow-${p.wallet}`} label="Unfollow" plain onPress={() => void toggleFollow($, p)} />
+                ) : (
+                  <Button key={`pp-follow-${p.wallet}`} label="Follow" variant="primary" onPress={() => void toggleFollow($, p)} />
+                )}
+              </Box>
+            ))}
+            {pp.loaded && (pp.offset > 0 || pp.more) && (
+              <Box gap={2}>
+                {pp.offset > 0 && <Button key="pp-prev" label="Prev" plain onPress={() => void loadPeople($, pp.query, Math.max(0, pp.offset - PAGE))} />}
+                {pp.more && <Button key="pp-next" label="Next" plain onPress={() => void loadPeople($, pp.query, pp.offset + PAGE)} />}
+              </Box>
+            )}
+          </Box>
         </Box>
       )
     }
     if (v.phase === 'signed-in' && c.screen === 'chat') {
-      const room = Math.max(3, (e.viewport?.rows ?? 24) - 6)
-      const shown = c.messages.slice(-room)
+      // Newest messages that fit: each run costs a header row, the photo two.
+      const budget = Math.max(4, rows - 6)
+      let used = 0
+      let from = c.messages.length
+      while (from > 0) {
+        const m = c.messages[from - 1]!
+        const starts = from === 1 || c.messages[from - 2]!.who !== m.who || m.id === c.firstNewId
+        const cost = 1 + (starts ? 2 : 0)
+        if (used + cost > budget && from < c.messages.length) break
+        used += cost
+        from--
+      }
+      const shown = c.messages.slice(from)
       const marker = c.firstNewId ? c.messages.findIndex((m) => m.id === c.firstNewId) : -1
       const newCount = marker >= 0 ? c.messages.length - marker : 0
+      // Runs: same person in a row; a new-marker starts a fresh run.
+      const runs: ChatMsg[][] = []
+      for (const m of shown) {
+        const last = runs[runs.length - 1]
+        if (last && last[0]!.who === m.who && m.id !== c.firstNewId) last.push(m)
+        else runs.push([m])
+      }
       return (
-        <Box flexDirection="column">
-          <Box>
-            {c.tabs.map((t) => (
-              <Button
-                key={`chat-tab-${t.id}`}
-                label={`#${oneLine(t.name, 20)}${t.id !== c.workspace?.id && t.unread > 0 ? ` ${t.unread}` : ''}`}
-                variant={t.id === c.workspace?.id ? 'primary' : undefined}
-                onPress={() => void openRoom($, t)}
-              />
-            ))}
-            {c.workspace && <Button key={`chat-close-${c.workspace.id}`} label=" ×" onPress={() => void closeRoom($, c.workspace!.id)} />}
-            <Button key="chat-back" label=" Back" onPress={() => void closeChat($)} />
+        <Box flexDirection="column" height={rows}>
+          {paneHead(ui, seatText)}
+          <Box paddingX={1} gap={2}>
+            {c.tabs.map((t) =>
+              tab(
+                `chat-tab-${t.id}`,
+                `#${oneLine(t.name, 20)}${t.id !== c.workspace?.id && t.unread > 0 ? ` ${t.unread}` : ''}`,
+                t.id === c.workspace?.id,
+                () => void openRoom($, t),
+              ),
+            )}
+            <Box flexGrow={1} />
+            <Button key="chat-back" label="Back" plain onPress={() => void closeChat($)} />
+            {c.workspace && <Button key={`chat-close-${c.workspace.id}`} label="✕" plain role="dismiss" onPress={() => void closeRoom($, c.workspace!.id)} />}
           </Box>
-          {c.workspace && st.seat?.workspaceId !== c.workspace.id && <Text>{NOT_JOINED}</Text>}
-          {c.status === 'offline' && c.messages.length === 0 && <Text color="yellow">Offline. Retrying.</Text>}
-          {!c.workspace && <Text>No chat open.</Text>}
-          {c.status === 'loading' && c.messages.length === 0 && <Text>Loading…</Text>}
-          {c.status === 'ready' && c.messages.length === 0 && <Text>No messages yet.</Text>}
-          {shown.map((m, i) => {
-            // A photo (or the initials) once per run of messages by the same person.
-            const first = i === 0 || shown[i - 1]!.who !== m.who
-            const ini = initialsOf(m.mine ? (v.name ?? m.name) : m.name)
-            const pic = m.photo ? ph.byWallet[bareWallet(m.photo)] : undefined
-            return (
-              <Box flexDirection="column">
-                {newCount > 0 && m.id === c.firstNewId && <Text color={BRAND}>{`── ${newCount} new ──`}</Text>}
-                <Box>
-                  {first && Img && pic?.state === 'ok' && pic.png ? (
-                    <Box width={AV_COLS + 1}>
-                      <Img key={`av-${i}`} source={{ png: pic.png }} columns={AV_COLS} rows={1} alt={ini} />
+          {paneRule(ui, cols)}
+          <Box flexDirection="column" flexGrow={1} paddingX={1}>
+            {c.workspace && st.seat?.workspaceId !== c.workspace.id && <Text>{NOT_JOINED}</Text>}
+            {c.status === 'offline' && c.messages.length === 0 && <Text color="yellow">Offline. Retrying.</Text>}
+            {!c.workspace && <Text>No chat open.</Text>}
+            {c.status === 'loading' && c.messages.length === 0 && <Text>Loading…</Text>}
+            {c.status === 'ready' && c.messages.length === 0 && <Text>No messages yet.</Text>}
+            {runs.map((run, ri) => {
+              const m = run[0]!
+              const ini = initialsOf(m.mine ? (v.name ?? m.name) : m.name)
+              const pic = m.photo ? ph.byWallet[bareWallet(m.photo)] : undefined
+              return (
+                <Box flexDirection="column">
+                  {newCount > 0 && m.id === c.firstNewId && <Text color={BRAND}>{`── ${newCount} new ──`}</Text>}
+                  <Box gap={1}>
+                    {Img && pic?.state === 'ok' && pic.png ? (
+                      <Box width={AV_COLS}>
+                        <Img key={`av-${ri}`} source={{ png: pic.png }} columns={AV_COLS} rows={2} alt={ini} />
+                      </Box>
+                    ) : (
+                      <Box width={AV_COLS}>
+                        <Text bold color={m.color ?? BRAND}>{ini}</Text>
+                      </Box>
+                    )}
+                    <Box flexDirection="column" flexGrow={1}>
+                      <Box justifyContent="space-between">
+                        <Text bold color={m.mine ? undefined : BRAND}>{m.name}</Text>
+                        <Text>{timeOf(m.at)}</Text>
+                      </Box>
+                      {run.map((x) => (
+                        <Text>{x.text}</Text>
+                      ))}
                     </Box>
-                  ) : (
-                    <Text bold color={m.color ?? BRAND}>{first ? `${ini}`.padEnd(AV_COLS + 1) : ' '.repeat(AV_COLS + 1)}</Text>
-                  )}
-                  <Text>
-                    <Text bold color={m.mine ? undefined : BRAND}>{m.name}</Text>
-                    {` · ${timeOf(m.at)} · ${m.text}`}
-                  </Text>
+                  </Box>
                 </Box>
+              )
+            })}
+            {c.send.phase === 'failed' && (
+              <Box>
+                <Text color="yellow">Not sent · </Text>
+                <Button key="chat-retry" label="Retry" variant="primary" onPress={() => void retrySend($, mem.chat)} />
               </Box>
-            )
-          })}
-          {c.send.phase === 'failed' && (
-            <Box>
-              <Text color="yellow">Not sent · </Text>
-              <Button key="chat-retry" label="Retry" variant="primary" onPress={() => void retrySend($, mem.chat)} />
-            </Box>
-          )}
-          {c.send.phase === 'limited' && (
-            <Box>
-              <Text color="yellow">{`Slow down — try again in ${c.send.seconds}s `}</Text>
-              <Button key="chat-retry" label="Retry" onPress={() => void retrySend($, mem.chat)} />
-            </Box>
-          )}
-          <Input
-            key="chat-input"
-            placeholder={`Message #${c.workspace?.name ?? 'chat'}…`}
-            value={c.draft}
-            submitLabel="send"
-            onInput={(t) => void setDraft($, t)}
-            onSubmit={(t) => void sendChat($, mem.chat, t)}
-          />
+            )}
+            {c.send.phase === 'limited' && (
+              <Box>
+                <Text color="yellow">{`Slow down — try again in ${c.send.seconds}s `}</Text>
+                <Button key="chat-retry" label="Retry" plain onPress={() => void retrySend($, mem.chat)} />
+              </Box>
+            )}
+          </Box>
+          {paneRule(ui, cols)}
+          <Box paddingX={1}>
+            <Input
+              key="chat-input"
+              placeholder={`Message #${c.workspace?.name ?? 'chat'}…`}
+              value={c.draft}
+              submitLabel="send"
+              onInput={(t) => void setDraft($, t)}
+              onSubmit={(t) => void sendChat($, mem.chat, t)}
+            />
+          </Box>
         </Box>
       )
     }
     return (
       <Box flexDirection="column">
-        <Text bold color={BRAND}>{v.phase === 'signed-in' ? `HiveOp · ${v.name ?? 'you'}` : 'HiveOp'}</Text>
+        {paneHead(ui, v.phase === 'signed-in' ? (st.seat ? seatText : (v.name ?? 'you')) : '')}
+        {paneRule(ui, cols)}
+        <Box flexDirection="column" paddingX={1}>
         {v.phase === 'signed-out' && (
           <Box flexDirection="column">
             <Text>Sign in with your HiveOp account.</Text>
@@ -1580,15 +1670,15 @@ export const register: Register = (on) => {
             <Text>Code <Text bold color={BRAND}>{v.code}</Text></Text>
             <Text>Approve it at</Text>
             <Text color={BRAND}>{v.link}</Text>
-            <Button key="cancel" label="Cancel" onPress={() => void signOut($, mem)} />
+            <Button key="cancel" plain label="Cancel" onPress={() => void signOut($, mem)} />
           </Box>
         )}
         {v.phase === 'signed-in' && (
           <Box flexDirection="column">
-            <Box>
+            <Box gap={2}>
               <Button key="open-chat" label={unreadTotal(c) > 0 ? `Chat · ${unreadTotal(c)} new` : 'Chat'} variant="primary" onPress={() => void showChat($)} />
-              <Button key="home-work" label={st.busy ? 'Joining…' : 'Work here'} onPress={() => void workHere($)} />
-              <Button key="home-claim" label={wk.claiming ? 'Claiming…' : 'Claim next'} onPress={() => void claimNext($)} />
+              <Button key="home-work" plain label={st.busy ? 'Joining…' : 'Work here'} onPress={() => void workHere($)} />
+              <Button key="home-claim" plain label={wk.claiming ? 'Claiming…' : 'Claim next'} onPress={() => void claimNext($)} />
             </Box>
             {st.seat && wk.loaded && (
               <Text wrap="truncate-end">
@@ -1597,19 +1687,19 @@ export const register: Register = (on) => {
             )}
             {st.seat && wk.note !== '' && <Text color={BRAND}>{oneLine(wk.note, 100)}</Text>}
             {st.seat && (
-              <Box>
+              <Box gap={2}>
                 <Text wrap="truncate-end">{`In ${oneLine(st.seat.workspaceName, 40)} as ${oneLine(st.seat.name, 30)} `}</Text>
-                <Button key="home-leave" label="Leave" onPress={() => void leaveSeat($)} />
+                <Button key="home-leave" plain label="Leave" onPress={() => void leaveSeat($)} />
               </Box>
             )}
             {st.note !== '' && <Text color={BRAND}>{oneLine(st.note, 100)}</Text>}
-            <Button key="home-auto" label={st.auto ? 'Join automatically in matching folders: on' : 'Join automatically in matching folders: off'} onPress={() => void setAuto($, !st.auto)} />
-            <Box>
-              <Button key="home-workspaces" label="Workspaces" onPress={() => void goTo($, 'workspaces')} />
-              <Button key="home-people" label="People" onPress={() => void goTo($, 'people')} />
-              <Button key="sign-out" label="Sign out" onPress={() => void signOut($, mem)} />
+            <Button key="home-auto" plain label={st.auto ? 'Join automatically in matching folders: on' : 'Join automatically in matching folders: off'} onPress={() => void setAuto($, !st.auto)} />
+            <Box gap={2}>
+              <Button key="home-workspaces" plain label="Workspaces" onPress={() => void goTo($, 'workspaces')} />
+              <Button key="home-people" plain label="People" onPress={() => void goTo($, 'people')} />
+              <Button key="sign-out" plain label="Sign out" onPress={() => void signOut($, mem)} />
             </Box>
-            {nv.band === 'hidden' && <Button key="home-show-band" label="Show band" onPress={() => void setBand($, 'shown')} />}
+            {nv.band === 'hidden' && <Button key="home-show-band" plain label="Show band" onPress={() => void setBand($, 'shown')} />}
           </Box>
         )}
         {v.phase === 'ended' && (
@@ -1618,7 +1708,8 @@ export const register: Register = (on) => {
             {v.reason !== 'not-open' && <Button key="retry" label="Sign in" variant="primary" onPress={() => void signIn($, mem)} />}
           </Box>
         )}
-        {v.phase !== 'signed-in' && nv.band === 'hidden' && <Button key="home-show-band" label="Show band" onPress={() => void setBand($, 'shown')} />}
+        {v.phase !== 'signed-in' && nv.band === 'hidden' && <Button key="home-show-band" plain label="Show band" onPress={() => void setBand($, 'shown')} />}
+        </Box>
       </Box>
     )
   })

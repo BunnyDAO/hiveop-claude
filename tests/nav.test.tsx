@@ -134,7 +134,8 @@ test('home: header with the name and every button, on both surfaces', async ($, 
   await start($)
   for (const surface of SURFACES) {
     const pane = await open($, surface)
-    expect(await text(pane)).toContain('HiveOp · Ada')
+    expect(await text(pane)).toContain('⬡ HiveOp')
+    expect(await text(pane)).toContain('Ada')
     for (const key of ['open-chat', 'home-work', 'home-claim', 'home-workspaces', 'home-people', 'sign-out']) {
       expect(await pane.find({ key })).toBeDefined()
     }

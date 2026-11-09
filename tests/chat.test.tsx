@@ -293,11 +293,51 @@ test('your own lines read "You", matched by account, never by name; your agents 
   for (const surface of SURFACES) {
     const pane = await $.ui.mount({ ...PANE, surface })
     const rows = (await pane.findAll({ type: 'Text' })).map((t: any) => t.text).join('\n')
-    expect(rows).toMatch(/You · .* · from me elsewhere/)
+    expect(rows).toMatch(/You\n\d\d:\d\d\nfrom me elsewhere/)
     expect(rows).not.toContain('Ryan Builder')
-    expect(rows).toMatch(/Scout · .* · from my agent/)
-    expect(rows).toMatch(/Ada · .* · from a namesake/)
+    expect(rows).toMatch(/Scout\n\d\d:\d\d\nfrom my agent/)
+    expect(rows).toMatch(/Ada\n\d\d:\d\d\nfrom a namesake/)
     await pane.unmount()
+  }
+})
+
+test('a run of messages shows the name and time once, the input is last, the header is branded', async ($, on) => {
+  world(on, { history: [msg('m1', 'one', 'Bea', 'BeaWallet'), msg('m2', 'two', 'Bea', 'BeaWallet'), msg('m3', 'three', 'Bea', 'BeaWallet')] })
+  await start($)
+  await $.command.run({ command: 'hiveop', args: 'chat', ...RUN })
+  for (const surface of SURFACES) {
+    const pane = await $.ui.mount({ ...PANE, surface })
+    const rows = (await pane.findAll({ type: 'Text' })).map((t: any) => t.text)
+    expect(rows.filter((t: string) => t === 'Bea')).toHaveLength(1)
+    expect(rows.filter((t: string) => /^\d\d:\d\d$/.test(t))).toHaveLength(1)
+    expect(rows).toEqual(expect.arrayContaining(['one', 'two', 'three', '⬡ HiveOp']))
+    const all = await text(pane)
+    expect(all.lastIndexOf('chat-input')).toBeGreaterThan(all.lastIndexOf('three'))
+    expect(all.lastIndexOf('chat-input')).toBeGreaterThan(all.lastIndexOf('chat-close'))
+    expect(await pane.find({ key: 'chat-close-ws-1' })).toBeDefined()
+    await pane.unmount()
+  }
+})
+
+test('band: plain hotkey buttons, the logo Image on the terminal and the glyph on desktop', async ($, on) => {
+  world(on)
+  await start($)
+  for (const surface of SURFACES) {
+    const band = await $.ui.mount({ ...BAND, surface })
+    const shown = await text(band)
+    expect(shown).toContain('"plain":true')
+    for (const [key, hotkey] of [['band-chat', '1'], ['band-hide', '2']]) {
+      expect(JSON.stringify(await band.find({ key }))).toContain(`"hotkey":"${hotkey}"`)
+    }
+    if (surface === 'terminal') {
+      expect(shown).toContain('"type":"Image"')
+      expect(shown).toContain('"columns":2')
+      expect(shown).toContain('"rows":1')
+    } else {
+      expect(shown).not.toContain('Image')
+      expect(shown).toContain('⬡')
+    }
+    await band.unmount()
   }
 })
 
