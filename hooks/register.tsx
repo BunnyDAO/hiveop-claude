@@ -1,12 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
-import type { AuthView, ChatMsg, ChatView, InviteRow, NavView, PilotRow, WsRow } from '../types'
+import type { AuthView, ChatMsg, ChatView, InviteRow, NavView, PilotRow, WorkView, WsRow } from '../types'
 import {
   type Fetched,
   acceptInvite,
+  claimIssue,
   computerName,
   declineInvite,
+  fetchWorkSummary,
   fetchMe,
   followingAmong,
   forgetKey,
@@ -50,6 +52,8 @@ const EMPTY_NAV: NavView = {
   people: { query: '', rows: [], following: [], offset: 0, more: false, loaded: false },
 }
 const nav = atom({ plugin: 'hiveop', key: 'nav' } as const, EMPTY_NAV, { shape: 'nav-1' })
+const EMPTY_WORK: WorkView = { workspaceId: null, loaded: false, ready: 0, inProgress: 0, next: null, note: '', claiming: false }
+const work = atom({ plugin: 'hiveop', key: 'work' } as const, EMPTY_WORK, { shape: 'work-1' })
 
 // Chat for the person's workspace, and the one sync loop that keeps it live.
 // The server rate-limits at 20/min: ONE request in flight, a floor between
@@ -175,6 +179,7 @@ async function ensureLoaded($: Engine): Promise<void> {
     return
   }
   await update($, chat, (c) => ({ ...c, workspace: p.ws, status: 'ready', messages: merge(c.workspace?.id === p.ws.id ? c.messages : [], h.msgs) }) as ChatView)
+  await refreshWork($)
 }
 
 /** Show the chat in the pane: the unread become the "N new" marker. */
@@ -322,6 +327,7 @@ async function bootstrap($: Engine, mem: ChatMem): Promise<number> {
     messages: merge(c.workspace?.id === p.ws.id ? c.messages : [], h.msgs),
     unread: c.workspace?.id === p.ws.id ? c.unread : 0,
   }) as ChatView)
+  await refreshWork($)
   return 0
 }
 
@@ -346,6 +352,7 @@ async function syncOnce($: Engine, mem: ChatMem): Promise<number> {
   if (typeof r.body?.cursor === 'string') mem.cursor = r.body.cursor
   const events = Array.isArray(r.body?.events) ? (r.body!.events as Array<Record<string, unknown>>) : []
   const v = await read($, chat)
+  await onWorkEvents($, events, v.me)
   const incoming: ChatMsg[] = []
   for (const ev of events) {
     if (ev.type !== 'workspace:chat_message' || ev.workspaceId !== v.workspace?.id) continue
@@ -365,6 +372,120 @@ async function syncOnce($: Engine, mem: ChatMem): Promise<number> {
     } as ChatView
   })
   return 0
+}
+
+// ── work band and Claim next (hcp-11) ──
+// The summary is fetched when the workspace is chosen and again when sync says
+// an issue in it changed: no polling. Titles are other people's words: band,
+// pane, toasts and transcript notices, never a command's returned text.
+
+const MAX_TOASTS = 3
+const workRun = { inflight: false, dirty: false }
+
+function oneLine(t: string, max = 60): string {
+  const x = t.replace(/\s+/g, ' ').trim()
+  return x.length > max ? `${x.slice(0, max - 1)}…` : x
+}
+
+async function setWork($: Engine, patch: Partial<WorkView>): Promise<void> {
+  await update($, work, (w) => ({ ...w, ...patch }) as WorkView)
+}
+
+/** Fetch the current workspace's counts and next item. Overlapping calls fold into one more fetch. */
+async function refreshWork($: Engine, keepNote = false): Promise<void> {
+  if (workRun.inflight) {
+    workRun.dirty = true
+    return
+  }
+  workRun.inflight = true
+  try {
+    do {
+      workRun.dirty = false
+      const wsId = (await read($, chat)).workspace?.id ?? null
+      if (!wsId) {
+        await update($, work, () => EMPTY_WORK)
+        continue
+      }
+      const out = await fetchWorkSummary($, wsId)
+      if ((await read($, chat)).workspace?.id !== wsId) {
+        workRun.dirty = true // moved while this was out
+        continue
+      }
+      if ('fail' in out) {
+        await update($, work, (w) => (w.workspaceId === wsId ? w : { ...EMPTY_WORK, workspaceId: wsId }) as WorkView)
+        continue
+      }
+      await update($, work, (w) => ({
+        ...w,
+        workspaceId: wsId,
+        loaded: true,
+        ready: out.summary.ready,
+        inProgress: out.summary.inProgress,
+        next: out.summary.next,
+        note: keepNote ? w.note : '',
+      }) as WorkView)
+    } while (workRun.dirty)
+  } finally {
+    workRun.inflight = false
+  }
+}
+
+/** Claim the top ready item as the person. Says the server's reason on a refusal. */
+async function claimNext($: Engine): Promise<string> {
+  if ((await read($, work)).claiming) return ''
+  const wsId = (await read($, chat)).workspace?.id
+  if (!wsId) return 'No workspace yet.'
+  await setWork($, { claiming: true, note: '' })
+  let note: string
+  try {
+    // Fresh, so a stale band never claims something already taken.
+    const fresh = await fetchWorkSummary($, wsId)
+    if ('fail' in fresh) note = refusal(fresh.fail)
+    else if (!fresh.summary.next) note = 'Nothing ready to claim.'
+    else {
+      const r = await claimIssue($, wsId, fresh.summary.next.id)
+      note = r && r.ok ? `Claimed: ${oneLine(fresh.summary.next.title)}` : refusal(r)
+    }
+  } catch {
+    note = "Couldn't reach HiveOp."
+  }
+  await setWork($, { claiming: false, note })
+  await refreshWork($, true)
+  $.ui.toast(`HiveOp · ${note}`)
+  return note
+}
+
+function workKind(ev: Record<string, unknown>, status: string): 'new' | 'claimed' | 'done' | null {
+  if (status === 'closed') return 'done'
+  if (ev.action === 'create') return 'new'
+  if (ev.action === 'claim') return 'claimed'
+  return null
+}
+
+/** Toasts for what changed (at most three at once), and a fresh summary when it touched the current workspace. */
+async function onWorkEvents($: Engine, events: Array<Record<string, unknown>>, me: string | null): Promise<void> {
+  const cur = (await read($, chat)).workspace?.id
+  const toasts: string[] = []
+  let touched = false
+  for (const ev of events) {
+    if (ev.type !== 'workspace:issue_changed') continue
+    if (ev.workspaceId === cur) touched = true
+    const issue = (ev.issue && typeof ev.issue === 'object' ? ev.issue : {}) as Record<string, unknown>
+    const kind = workKind(ev, str(issue.status))
+    const title = oneLine(str(issue.title))
+    if (!kind || !title) continue
+    if (kind === 'claimed' && sameWallet(str(issue.assigneeWallet), me)) continue // the person's own claim
+    toasts.push(`HiveOp · ${kind}: ${title}`)
+  }
+  const shown = toasts.length > MAX_TOASTS ? [...toasts.slice(0, MAX_TOASTS - 1), `HiveOp · +${toasts.length - (MAX_TOASTS - 1)} more`] : toasts
+  for (const t of shown) $.ui.toast(t)
+  if (touched) await refreshWork($)
+}
+
+function workText(w: WorkView): string {
+  if (!w.loaded) return ''
+  const next = w.next ? ` · next: ${oneLine(w.next.title, 40)}` : ''
+  return ` · ${w.ready} ready · ${w.inProgress} in progress${next}`
 }
 
 // ── narrow windows ──
@@ -432,6 +553,8 @@ async function chooseWorkspace($: Engine, ws: WsRow): Promise<void> {
   const before = await read($, chat)
   if (before.workspace?.id === ws.id) return
   await update($, chat, (c) => ({ ...c, workspace: ref, status: 'loading', messages: [], unread: 0, firstNewId: null, draft: '', send: { phase: 'idle' } }) as ChatView)
+  await update($, work, () => EMPTY_WORK)
+  void refreshWork($)
   const h = await loadHistory($, ws.id, before.me)
   if ((await read($, chat)).workspace?.id !== ws.id) return // chosen again while this was out
   if ('r' in h) {
@@ -769,6 +892,7 @@ async function signOut($: Engine, mem: Mem) {
   await forgetKey($)
   await update($, auth, () => ({ phase: 'signed-out' }) as AuthView)
   await update($, chat, () => EMPTY_CHAT)
+  await update($, work, () => EMPTY_WORK)
   await resetNav($)
 }
 
@@ -863,6 +987,7 @@ export const register: Register = (on) => {
     if (e.props.hasSurvey) return next(e)
     const c = await read($, chat)
     const nv = await read($, nav)
+    const wk = await read($, work)
     if (nv.band === 'hidden') return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     return (
@@ -871,11 +996,16 @@ export const register: Register = (on) => {
           <Text color={BRAND} bold>HiveOp</Text>
           {bandText(v)}
           {v.phase === 'signed-in' && c.unread > 0 && <Text bold color={BRAND}>{` · ${c.unread} new`}</Text>}
+          {v.phase === 'signed-in' && workText(wk)}
+          {v.phase === 'signed-in' && wk.note !== '' && ` · ${oneLine(wk.note, 70)}`}
         </Text>
         {(v.phase === 'signed-out' || v.phase === 'ended') && (
           <Button key="band-sign-in" label=" Sign in" onPress={() => void signIn($, mem)} />
         )}
         {v.phase === 'signed-in' && <Button key="band-chat" label=" Chat" onPress={() => void showChat($)} />}
+        {v.phase === 'signed-in' && wk.loaded && wk.ready > 0 && (
+          <Button key="band-claim" label={wk.claiming ? ' Claiming…' : ' Claim'} onPress={() => void claimNext($)} />
+        )}
         <Button key="band-hide" label=" Hide" onPress={() => void setBand($, 'hidden')} />
       </Box>
     )
@@ -885,6 +1015,7 @@ export const register: Register = (on) => {
     const v = await read($, auth)
     const c = await read($, chat)
     const nv = await read($, nav)
+    const wk = await read($, work)
     const { Box, Button, Input, Text } = $.ui.resolve(e)
     const room = Math.max(3, (e.viewport?.rows ?? 24) - 9)
     if (v.phase === 'signed-in' && c.screen !== 'chat' && nv.screen === 'workspaces') {
@@ -1066,8 +1197,14 @@ export const register: Register = (on) => {
             <Box>
               <Button key="open-chat" label={c.unread > 0 ? `Chat · ${c.unread} new` : 'Chat'} variant="primary" onPress={() => void showChat($)} />
               <Button key="home-work" label="Work here · soon" onPress={() => $.ui.toast('Work here is coming soon')} />
-              <Button key="home-claim" label="Claim next · soon" onPress={() => $.ui.toast('Claim next is coming soon')} />
+              <Button key="home-claim" label={wk.claiming ? 'Claiming…' : 'Claim next'} onPress={() => void claimNext($)} />
             </Box>
+            {wk.loaded && (
+              <Text wrap="truncate-end">
+                {`${wk.ready} ready · ${wk.inProgress} in progress${wk.next ? ` · next: ${oneLine(wk.next.title, 60)}` : ''}`}
+              </Text>
+            )}
+            {wk.note !== '' && <Text color={BRAND}>{oneLine(wk.note, 100)}</Text>}
             <Box>
               <Button key="home-workspaces" label="Workspaces" onPress={() => void goTo($, 'workspaces')} />
               <Button key="home-people" label="People" onPress={() => void goTo($, 'people')} />
@@ -1127,7 +1264,7 @@ async function narrow($: Engine, mem: Mem, view: AuthView): Promise<string> {
       else if (pick === 'People') await narrowPeople($)
       else if (pick === 'More') {
         const bandWord = nv.band === 'hidden' ? 'Show band' : 'Hide band'
-        const more = await ask($, 'More', [bandWord, 'Sign out', 'Work here · soon', 'Claim next · soon'])
+        const more = await ask($, 'More', [bandWord, 'Claim next', 'Sign out', 'Work here · soon'])
         if (more === bandWord) {
           await setBand($, nv.band === 'hidden' ? 'shown' : 'hidden')
           return 'Done.'
@@ -1136,7 +1273,12 @@ async function narrow($: Engine, mem: Mem, view: AuthView): Promise<string> {
           await signOut($, mem)
           return 'Signed out of HiveOp on this computer.'
         }
-        if (more === 'Work here · soon' || more === 'Claim next · soon') $.ui.log('Coming soon.')
+        if (more === 'Claim next') {
+          await ensureLoaded($)
+          $.ui.log(`HiveOp · ${await claimNext($)}`)
+          return 'Done.'
+        }
+        if (more === 'Work here · soon') $.ui.log('Coming soon.')
         continue
       } else return `HiveOp · ${view.name ?? 'signed in'}`
       return 'Done.'

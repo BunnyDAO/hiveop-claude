@@ -53,8 +53,20 @@ export type NavView = {
   people: { query: string; rows: PilotRow[]; following: string[]; offset: number; more: boolean; loaded: boolean }
 }
 
+/** The work band: the current workspace's ready queue. Titles are other people's words: band, pane and toasts only. */
+export type WorkView = {
+  workspaceId: string | null
+  loaded: boolean
+  ready: number
+  inProgress: number
+  next: { id: string; title: string } | null
+  // One plain line after Claim: what happened, or the server's own reason.
+  note: string
+  claiming: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    hiveop: { auth: Shaped<AuthView>; chat: Shaped<ChatView>; nav: Shaped<NavView> }
+    hiveop: { auth: Shaped<AuthView>; chat: Shaped<ChatView>; nav: Shaped<NavView>; work: Shaped<WorkView> }
   }
 }

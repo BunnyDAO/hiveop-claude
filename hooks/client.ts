@@ -286,3 +286,21 @@ export async function followingAmong($: Engine, wallets: string[]): Promise<stri
 export async function setFollow($: Engine, wallet: string, on: boolean): Promise<Fetched | null> {
   return hiveop($, `/users/${encodeURIComponent(wallet)}/follow`, { method: on ? 'POST' : 'DELETE' })
 }
+
+// ── work (hcp-11) ──
+
+export type WorkSummary = { ready: number; inProgress: number; next: { id: string; title: string } | null }
+
+export async function fetchWorkSummary($: Engine, wsId: string): Promise<{ summary: WorkSummary } | { fail: Fetched | null }> {
+  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/work-summary`)
+  if (!r || !r.ok || !r.body) return { fail: r }
+  const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0)
+  const nx = r.body.next as { id?: unknown; title?: unknown } | null | undefined
+  const next = nx && s(nx.id) ? { id: s(nx.id), title: s(nx.title).trim() || 'untitled' } : null
+  return { summary: { ready: n(r.body.ready), inProgress: n(r.body.inProgress), next } }
+}
+
+/** Claim as the person. The server's one-at-a-time rule and its words come back in `refusal`. */
+export async function claimIssue($: Engine, wsId: string, issueId: string): Promise<Fetched | null> {
+  return hiveop($, `/workspaces/${encodeURIComponent(wsId)}/issues/${encodeURIComponent(issueId)}/claim`, { method: 'POST' })
+}

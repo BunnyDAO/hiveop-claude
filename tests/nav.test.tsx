@@ -136,7 +136,7 @@ test('home: header with the name and every button, on both surfaces', async ($, 
     }
     const shown = await text(pane)
     expect(shown).toContain('Work here · soon')
-    expect(shown).toContain('Claim next · soon')
+    expect(shown).toContain('Claim next')
     await pane.unmount()
   }
 })
