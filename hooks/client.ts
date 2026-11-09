@@ -139,7 +139,18 @@ export async function forgetKey($: Engine): Promise<void> {
 
 // ── authenticated requests ──
 
-export type Fetched = { ok: boolean; status: number; body: Record<string, unknown> | null }
+export type Fetched = { ok: boolean; status: number; body: Record<string, unknown> | null; retryAfterSec: number | null }
+
+function retryAfter(h: Record<string, string> | undefined): number | null {
+  if (!h) return null
+  for (const k of Object.keys(h)) {
+    if (k.toLowerCase() === 'retry-after') {
+      const n = Number(h[k])
+      return Number.isFinite(n) && n >= 0 ? Math.min(Math.ceil(n), 3600) : null
+    }
+  }
+  return null
+}
 
 export async function hiveop($: Engine, path: string, init: { method?: string; body?: unknown } = {}): Promise<Fetched | null> {
   const key = await loadKey($)
@@ -150,21 +161,22 @@ export async function hiveop($: Engine, path: string, init: { method?: string; b
       headers: headers(key),
       body: init.body === undefined ? undefined : JSON.stringify(init.body),
     })
-    return { ok: res.ok, status: res.status, body: parse(res.text) }
+    return { ok: res.ok, status: res.status, body: parse(res.text), retryAfterSec: retryAfter(res.headers) }
   } catch {
-    return { ok: false, status: 0, body: null }
+    return { ok: false, status: 0, body: null, retryAfterSec: null }
   }
 }
 
 /** The signed-in person's display name; null when they have none. */
-export type Me = { state: 'ok'; name: string | null } | { state: 'rejected' } | { state: 'unreachable' }
+export type Me = { state: 'ok'; name: string | null; wallet: string | null } | { state: 'rejected' } | { state: 'unreachable' }
 
 export async function fetchMe($: Engine): Promise<Me> {
   const r = await hiveop($, '/me/hive/profile')
   if (!r || r.status === 0) return { state: 'unreachable' }
   if (r.status === 401 || r.status === 403) return { state: 'rejected' }
   if (!r.ok) return { state: 'unreachable' }
-  const profile = r.body?.profile as { displayName?: unknown } | undefined
+  const profile = r.body?.profile as { displayName?: unknown; walletPubkey?: unknown } | undefined
   const name = typeof profile?.displayName === 'string' && profile.displayName.trim() ? profile.displayName.trim() : null
-  return { state: 'ok', name }
+  const wallet = typeof profile?.walletPubkey === 'string' && profile.walletPubkey ? profile.walletPubkey : null
+  return { state: 'ok', name, wallet }
 }

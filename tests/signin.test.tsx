@@ -136,9 +136,10 @@ test('sign in: code and link show, approval stores the key user-only and the ban
   }
 
   // Polling stopped on approval.
-  const before = w.calls.length
+  const pairing = () => w.calls.filter((c) => c.url.includes('/pairing/')).length
+  const before = pairing()
   await clock.advance(30_000)
-  expect(w.calls.length).toBe(before)
+  expect(pairing()).toBe(before)
 })
 
 test('the key never reaches command output', async ($, on) => {
