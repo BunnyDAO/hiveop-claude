@@ -123,6 +123,9 @@ function bandText(v: AuthView): string {
   }
 }
 
+// HiveOp brand cyan (app.hiveop.io accent).
+const BRAND = '#22D3EE'
+
 export const register: Register = (on) => {
   const mem: Mem = { timer: null, pollToken: null, failures: 0, expiresAtMs: 0 }
 
@@ -154,7 +157,7 @@ export const register: Register = (on) => {
     return (
       <Box>
         <Text wrap="truncate-end">
-          <Text color="cyan" bold>HiveOp</Text>
+          <Text color={BRAND} bold>HiveOp</Text>
           {bandText(v)}
         </Text>
         {(v.phase === 'signed-out' || v.phase === 'ended') && (
@@ -169,7 +172,7 @@ export const register: Register = (on) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
-        <Text bold>HiveOp</Text>
+        <Text bold color={BRAND}>HiveOp</Text>
         {v.phase === 'signed-out' && (
           <Box flexDirection="column">
             <Text>Sign in with your HiveOp account.</Text>
@@ -178,15 +181,15 @@ export const register: Register = (on) => {
         )}
         {v.phase === 'pairing' && (
           <Box flexDirection="column">
-            <Text>Code <Text bold>{v.code}</Text></Text>
+            <Text>Code <Text bold color={BRAND}>{v.code}</Text></Text>
             <Text>Approve it at</Text>
-            <Text color="cyan">{v.link}</Text>
+            <Text color={BRAND}>{v.link}</Text>
             <Button key="cancel" label="Cancel" onPress={() => void signOut($, mem)} />
           </Box>
         )}
         {v.phase === 'signed-in' && (
           <Box flexDirection="column">
-            <Text>Signed in as <Text bold>{v.name ?? 'you'}</Text></Text>
+            <Text>Signed in as <Text bold color={BRAND}>{v.name ?? 'you'}</Text></Text>
             <Button key="sign-out" label="Sign out" onPress={() => void signOut($, mem)} />
           </Box>
         )}
