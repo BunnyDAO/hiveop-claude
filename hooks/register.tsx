@@ -1,8 +1,29 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
-import type { AuthView, ChatMsg, ChatView } from '../types'
-import { type Fetched, computerName, fetchMe, forgetKey, hiveop, loadKey, pollPairing, saveKey, startPairing } from './client'
+import type { AuthView, ChatMsg, ChatView, InviteRow, NavView, PilotRow, WsRow } from '../types'
+import {
+  type Fetched,
+  acceptInvite,
+  computerName,
+  declineInvite,
+  fetchMe,
+  followingAmong,
+  forgetKey,
+  hiveop,
+  joinWorkspace,
+  listExplore,
+  listInvites,
+  listMine,
+  listPilots,
+  loadKey,
+  pollPairing,
+  refusal,
+  requestToJoin,
+  saveKey,
+  setFollow,
+  startPairing,
+} from './client'
 
 const EMPTY_CHAT: ChatView = {
   workspace: null,
@@ -17,6 +38,18 @@ const EMPTY_CHAT: ChatView = {
 }
 const auth = atom({ plugin: 'hiveop', key: 'auth' } as const, { phase: 'signed-out' } as AuthView, { shape: 'auth-1' })
 const chat = atom({ plugin: 'hiveop', key: 'chat' } as const, EMPTY_CHAT, { shape: 'chat-1' })
+const EMPTY_NAV: NavView = {
+  screen: 'home',
+  tab: 'mine',
+  band: 'shown',
+  note: '',
+  current: null,
+  mine: null,
+  invites: null,
+  explore: { search: '', rows: [], offset: 0, total: 0, loaded: false },
+  people: { query: '', rows: [], following: [], offset: 0, more: false, loaded: false },
+}
+const nav = atom({ plugin: 'hiveop', key: 'nav' } as const, EMPTY_NAV, { shape: 'nav-1' })
 
 // Chat for the person's workspace, and the one sync loop that keeps it live.
 // The server rate-limits at 20/min: ONE request in flight, a floor between
@@ -353,6 +386,294 @@ async function logRecent($: Engine, count = 10): Promise<void> {
   for (const m of rows) $.ui.log(`${m.name} · ${timeOf(m.at)} · ${m.text.replace(/\s+/g, ' ').slice(0, 400)}`)
 }
 
+// ── home, workspaces, people (hcp-10) ──
+// Names in these lists are other people's: they are drawn in the pane or sent
+// to transcript notices ($.ui.log), never returned from a command.
+
+const STORE_BAND = 'band.hidden'
+const PAGE = 6
+const NARROW_PAGE = 12
+
+async function setNav($: Engine, patch: Partial<NavView>): Promise<void> {
+  await update($, nav, (n) => ({ ...n, ...patch }) as NavView)
+}
+
+async function setBand($: Engine, band: 'shown' | 'hidden'): Promise<void> {
+  await setNav($, { band })
+  await $.store.set(STORE_BAND, band === 'hidden')
+}
+
+async function restoreNav($: Engine): Promise<void> {
+  const hidden = (await $.store.get(STORE_BAND)) === true
+  await update($, nav, () => ({ ...EMPTY_NAV, band: hidden ? 'hidden' : 'shown' }) as NavView)
+}
+
+async function resetNav($: Engine): Promise<void> {
+  await update($, nav, (n) => ({ ...EMPTY_NAV, band: n.band }) as NavView)
+}
+
+async function loadMine($: Engine): Promise<void> {
+  const out = await listMine($)
+  if ('fail' in out) {
+    await setNav($, { note: refusal(out.fail) })
+    return
+  }
+  const c = await read($, chat)
+  const stored = (await $.store.get(STORE_WS)) as { id?: unknown } | undefined
+  const pick = [c.workspace?.id, typeof stored?.id === 'string' ? stored.id : undefined].find((id) => id && out.rows.some((w) => w.id === id))
+  await setNav($, { mine: out.rows, current: pick ?? out.rows[0]?.id ?? null })
+}
+
+/** Make this the workspace the chat and the band follow. The sync loop is global and carries on. */
+async function chooseWorkspace($: Engine, ws: WsRow): Promise<void> {
+  const ref = { id: ws.id, name: ws.name }
+  await $.store.set(STORE_WS, ref)
+  await setNav($, { current: ws.id, note: `Now in ${ws.name}.` })
+  const before = await read($, chat)
+  if (before.workspace?.id === ws.id) return
+  await update($, chat, (c) => ({ ...c, workspace: ref, status: 'loading', messages: [], unread: 0, firstNewId: null, draft: '', send: { phase: 'idle' } }) as ChatView)
+  const h = await loadHistory($, ws.id, before.me)
+  if ((await read($, chat)).workspace?.id !== ws.id) return // chosen again while this was out
+  if ('r' in h) {
+    await update($, chat, (c) => ({ ...c, status: 'offline' }) as ChatView)
+    return
+  }
+  await update($, chat, (c) => ({ ...c, status: 'ready', messages: merge([], h.msgs) }) as ChatView)
+}
+
+async function loadInvites($: Engine): Promise<void> {
+  const out = await listInvites($)
+  if ('fail' in out) {
+    await setNav($, { note: refusal(out.fail) })
+    return
+  }
+  await setNav($, { invites: out.rows })
+}
+
+async function answerInvite($: Engine, row: InviteRow, accept: boolean): Promise<void> {
+  const r = accept ? await acceptInvite($, row.token) : await declineInvite($, row.id)
+  if (!r || !r.ok) {
+    await setNav($, { note: refusal(r) })
+    return
+  }
+  await update($, nav, (n) => ({
+    ...n,
+    note: accept ? `Joined ${row.wsName}.` : `Declined ${row.wsName}.`,
+    invites: (n.invites ?? []).filter((i) => i.id !== row.id),
+    mine: accept ? null : n.mine,
+  }) as NavView)
+}
+
+async function loadExplore($: Engine, search: string, offset: number, limit = PAGE): Promise<void> {
+  const out = await listExplore($, search, offset, limit)
+  if ('fail' in out) {
+    await setNav($, { note: refusal(out.fail) })
+    return
+  }
+  await update($, nav, (n) => ({ ...n, note: '', explore: { search, rows: out.rows, offset, total: out.total, loaded: true } }) as NavView)
+}
+
+async function setExploreText($: Engine, text: string): Promise<void> {
+  await update($, nav, (n) => ({ ...n, explore: { ...n.explore, search: text } }) as NavView)
+}
+
+/** Open workspaces are joined; the rest are asked. The server's refusal is shown as it said it. */
+async function joinRow($: Engine, row: WsRow): Promise<void> {
+  const ask = row.kind !== 'github'
+  const r = ask ? await requestToJoin($, row.id) : await joinWorkspace($, row.id)
+  if (!r || !r.ok) {
+    await setNav($, { note: refusal(r) })
+    return
+  }
+  if (ask) {
+    await setNav($, { note: `Asked to join ${row.name}.` })
+    return
+  }
+  const standing = ((r.body?.workspace ?? {}) as { standing?: unknown }).standing
+  await setNav($, { note: standing === 'visitor' ? `Visiting ${row.name}.` : `Joined ${row.name}.`, mine: null })
+}
+
+async function loadPeople($: Engine, query: string, offset: number, limit = PAGE): Promise<void> {
+  const out = await listPilots($, query, offset, limit + 1)
+  if ('fail' in out) {
+    await setNav($, { note: refusal(out.fail) })
+    return
+  }
+  const me = (await read($, chat)).me
+  const all = out.rows.filter((p) => !sameWallet(p.wallet, me))
+  const rows = all.slice(0, limit)
+  const following = (await followingAmong($, rows.map((p) => p.wallet))) ?? []
+  await update($, nav, (n) => ({ ...n, note: '', people: { query, rows, following, offset, more: out.rows.length > limit, loaded: true } }) as NavView)
+}
+
+async function setPeopleText($: Engine, text: string): Promise<void> {
+  await update($, nav, (n) => ({ ...n, people: { ...n.people, query: text } }) as NavView)
+}
+
+async function toggleFollow($: Engine, p: PilotRow): Promise<void> {
+  const was = (await read($, nav)).people.following.includes(p.wallet)
+  const r = await setFollow($, p.wallet, !was)
+  if (!r || !r.ok) {
+    await setNav($, { note: refusal(r) })
+    return
+  }
+  await update($, nav, (n) => ({
+    ...n,
+    note: was ? `Unfollowed ${p.name}.` : `Following ${p.name}.`,
+    people: { ...n.people, following: was ? n.people.following.filter((w) => w !== p.wallet) : [...n.people.following, p.wallet] },
+  }) as NavView)
+}
+
+async function showTab($: Engine, tab: NavView['tab']): Promise<void> {
+  await setNav($, { tab, note: '' })
+  const n = await read($, nav)
+  if (tab === 'mine') await loadMine($)
+  else if (tab === 'invites') await loadInvites($)
+  else if (!n.explore.loaded) await loadExplore($, '', 0)
+}
+
+/** Move the pane to home, workspaces or people. The chat room steps aside. */
+async function goTo($: Engine, screen: NavView['screen']): Promise<void> {
+  await closeChat($)
+  await setNav($, { screen, note: '' })
+  if (screen === 'workspaces') await showTab($, 'mine')
+  if (screen === 'people') await loadPeople($, '', 0)
+}
+
+// ── narrow windows: the same choices as pick-lists ──
+
+async function ask($: Engine, question: string, options: string[]): Promise<string | null> {
+  try {
+    return await $.ui.ask(question, options)
+  } catch {
+    return null
+  }
+}
+
+type Chosen = { item: number } | { text: string } | null
+
+/** Three at a time, then More… (the dialog takes 2-4 options). Typed text under Other comes back as `text`. */
+async function pickFrom($: Engine, question: string, labels: string[]): Promise<Chosen> {
+  const seen = new Map<string, number>()
+  const unique = labels.map((l) => {
+    const n = (seen.get(l) ?? 0) + 1
+    seen.set(l, n)
+    return n === 1 ? l : `${l} (${n})`
+  })
+  let page = 0
+  for (;;) {
+    const items = unique.slice(page * 3, page * 3 + 3)
+    const more = (page + 1) * 3 < unique.length
+    const answer = await ask($, question, [...items, more ? 'More…' : 'Back'])
+    if (answer === null || answer === 'Back') return null
+    if (answer === 'More…') {
+      page += 1
+      continue
+    }
+    const at = items.indexOf(answer)
+    return at >= 0 ? { item: page * 3 + at } : { text: answer.trim() }
+  }
+}
+
+async function say($: Engine): Promise<void> {
+  const note = (await read($, nav)).note
+  if (note) $.ui.log(note)
+}
+
+async function narrowWorkspaces($: Engine): Promise<void> {
+  for (;;) {
+    const tab = await ask($, 'Workspaces', ['Mine', 'Invites', 'Explore', 'Back'])
+    if (tab === 'Mine') {
+      await loadMine($)
+      const n = await read($, nav)
+      if (!n.mine || n.mine.length === 0) {
+        $.ui.log(n.note || 'No workspaces yet.')
+        continue
+      }
+      const rows = n.mine
+      const got = await pickFrom($, 'Use which workspace?', rows.map((w) => (w.id === n.current ? `${w.name} · current` : w.name)))
+      if (got && 'item' in got) {
+        await chooseWorkspace($, rows[got.item]!)
+        await say($)
+        return
+      }
+    } else if (tab === 'Invites') {
+      await loadInvites($)
+      const n = await read($, nav)
+      if (!n.invites || n.invites.length === 0) {
+        $.ui.log(n.note || 'No invites.')
+        continue
+      }
+      const rows = n.invites
+      const got = await pickFrom($, 'Which invite?', rows.map((i) => i.wsName))
+      if (got && 'item' in got) {
+        const row = rows[got.item]!
+        const what = await ask($, `Invite to ${row.wsName}`, ['Accept', 'Decline', 'Back'])
+        if (what === 'Accept' || what === 'Decline') {
+          await answerInvite($, row, what === 'Accept')
+          await say($)
+          return
+        }
+      }
+    } else if (tab === 'Explore') {
+      let search = ''
+      for (;;) {
+        await loadExplore($, search, 0, NARROW_PAGE)
+        const n = await read($, nav)
+        if (n.explore.rows.length === 0) {
+          $.ui.log(n.note || 'No workspaces found.')
+          break
+        }
+        const rows = n.explore.rows
+        const got = await pickFrom($, 'Join which? Or type a search.', rows.map((w) => w.name))
+        if (got && 'text' in got) {
+          search = got.text
+          continue
+        }
+        if (got) {
+          const row = rows[got.item]!
+          const verb = row.kind === 'github' ? 'Join' : 'Request to join'
+          const what = await ask($, row.name, [verb, 'Back'])
+          if (what === verb) {
+            await joinRow($, row)
+            await say($)
+            return
+          }
+        }
+        break
+      }
+    } else return
+  }
+}
+
+async function narrowPeople($: Engine): Promise<void> {
+  let query = ''
+  for (;;) {
+    await loadPeople($, query, 0, NARROW_PAGE)
+    const n = await read($, nav)
+    const rows = n.people.rows
+    if (rows.length === 0) {
+      $.ui.log(n.note || 'No one found.')
+      return
+    }
+    const got = await pickFrom($, 'Which person? Or type a search.', rows.map((p) => (n.people.following.includes(p.wallet) ? `${p.name} · following` : p.name)))
+    if (got && 'text' in got) {
+      query = got.text
+      continue
+    }
+    if (!got) return
+    const p = rows[got.item]!
+    const on = n.people.following.includes(p.wallet)
+    const verb = on ? 'Unfollow' : 'Follow'
+    const what = await ask($, p.name, [verb, 'Back'])
+    if (what === verb) {
+      await toggleFollow($, p)
+      await say($)
+      return
+    }
+  }
+}
+
 const POLL_MS = 3000
 const MAX_POLL_FAILURES = 5
 
@@ -448,6 +769,7 @@ async function signOut($: Engine, mem: Mem) {
   await forgetKey($)
   await update($, auth, () => ({ phase: 'signed-out' }) as AuthView)
   await update($, chat, () => EMPTY_CHAT)
+  await resetNav($)
 }
 
 async function restore($: Engine, mem: Mem) {
@@ -483,6 +805,7 @@ export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'hiveop', description: 'HiveOp: sign in, chat, your account in Claude Code' })
     await $.command.register({ name: 'say', description: 'Say something in your HiveOp workspace chat', argumentHint: '<message>' })
+    await restoreNav($)
     await restore($, mem)
     return next(e)
   })
@@ -508,8 +831,19 @@ export const register: Register = (on) => {
     }
     if (view.phase !== 'signed-in' && view.phase !== 'pairing') view = await signInIfAsked($, mem, view, sub)
 
-    const wantsChat = sub === 'chat' && view.phase === 'signed-in'
+    const signed = view.phase === 'signed-in'
+    const wantsChat = sub === 'chat' && signed
+    const wantsNav = signed && (sub === 'workspaces' || sub === 'people') ? sub : null
     const opened = await $.ui.open({ id: PANE, title: 'HiveOp' })
+    if (wantsNav) {
+      if (opened.isPlaced) {
+        await goTo($, wantsNav)
+        return { text: 'HiveOp opened.' }
+      }
+      await (wantsNav === 'workspaces' ? narrowWorkspaces($) : narrowPeople($))
+      return { text: 'Done.' }
+    }
+    if (opened.isPlaced && signed) await goTo($, 'home')
     if (wantsChat) {
       await ensureLoaded($)
       if (opened.isPlaced) {
@@ -528,6 +862,8 @@ export const register: Register = (on) => {
     const v = await read($, auth)
     if (e.props.hasSurvey) return next(e)
     const c = await read($, chat)
+    const nv = await read($, nav)
+    if (nv.band === 'hidden') return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     return (
       <Box>
@@ -540,6 +876,7 @@ export const register: Register = (on) => {
           <Button key="band-sign-in" label=" Sign in" onPress={() => void signIn($, mem)} />
         )}
         {v.phase === 'signed-in' && <Button key="band-chat" label=" Chat" onPress={() => void showChat($)} />}
+        <Button key="band-hide" label=" Hide" onPress={() => void setBand($, 'hidden')} />
       </Box>
     )
   })
@@ -547,7 +884,119 @@ export const register: Register = (on) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const v = await read($, auth)
     const c = await read($, chat)
+    const nv = await read($, nav)
     const { Box, Button, Input, Text } = $.ui.resolve(e)
+    const room = Math.max(3, (e.viewport?.rows ?? 24) - 9)
+    if (v.phase === 'signed-in' && c.screen !== 'chat' && nv.screen === 'workspaces') {
+      const ex = nv.explore
+      return (
+        <Box flexDirection="column">
+          <Box>
+            <Text bold color={BRAND}>Workspaces</Text>
+            <Button key="nav-back" label=" Back" onPress={() => void goTo($, 'home')} />
+          </Box>
+          <Box>
+            <Button key="tab-mine" label="Mine" variant={nv.tab === 'mine' ? 'primary' : undefined} onPress={() => void showTab($, 'mine')} />
+            <Button
+              key="tab-invites"
+              label={nv.invites && nv.invites.length > 0 ? `Invites · ${nv.invites.length}` : 'Invites'}
+              variant={nv.tab === 'invites' ? 'primary' : undefined}
+              onPress={() => void showTab($, 'invites')}
+            />
+            <Button key="tab-explore" label="Explore" variant={nv.tab === 'explore' ? 'primary' : undefined} onPress={() => void showTab($, 'explore')} />
+          </Box>
+          {nv.note !== '' && <Text bold>{nv.note}</Text>}
+          {nv.tab === 'mine' && nv.mine === null && <Text>Loading…</Text>}
+          {nv.tab === 'mine' && nv.mine !== null && nv.mine.length === 0 && <Text>No workspaces yet. Create one at app.hiveop.io.</Text>}
+          {nv.tab === 'mine' &&
+            (nv.mine ?? []).slice(0, room).map((w) => (
+              <Box>
+                <Text bold={w.id === nv.current} color={w.id === nv.current ? BRAND : undefined}>{`${w.id === nv.current ? '● ' : '  '}${w.name}`}</Text>
+                {w.id !== nv.current && <Button key={`ws-use-${w.id}`} label=" Use" onPress={() => void chooseWorkspace($, w)} />}
+                {w.id === nv.current && <Text>{' · current'}</Text>}
+              </Box>
+            ))}
+          {nv.tab === 'invites' && nv.invites === null && <Text>Loading…</Text>}
+          {nv.tab === 'invites' && nv.invites !== null && nv.invites.length === 0 && <Text>No invites.</Text>}
+          {nv.tab === 'invites' &&
+            (nv.invites ?? []).slice(0, room).map((i) => (
+              <Box>
+                <Text>{`${i.wsName} `}</Text>
+                <Button key={`inv-accept-${i.id}`} label="Accept" variant="primary" onPress={() => void answerInvite($, i, true)} />
+                <Button key={`inv-decline-${i.id}`} label="Decline" onPress={() => void answerInvite($, i, false)} />
+              </Box>
+            ))}
+          {nv.tab === 'explore' && (
+            <Input
+              key="ex-search"
+              placeholder="Search public workspaces…"
+              value={ex.search}
+              submitLabel="search"
+              onInput={(t) => void setExploreText($, t)}
+              onSubmit={(t) => void loadExplore($, t.trim(), 0)}
+            />
+          )}
+          {nv.tab === 'explore' && !ex.loaded && <Text>Loading…</Text>}
+          {nv.tab === 'explore' && ex.loaded && ex.rows.length === 0 && <Text>No workspaces found.</Text>}
+          {nv.tab === 'explore' &&
+            ex.rows.map((w) => (
+              <Box>
+                <Text>{`${w.name}${w.members !== null ? ` · ${w.members}` : ''} `}</Text>
+                {(w.kind === 'github' || w.canJoin) && (
+                  <Button key={`ex-join-${w.id}`} label={w.kind === 'github' ? 'Join' : 'Request to join'} onPress={() => void joinRow($, w)} />
+                )}
+                {w.kind !== 'github' && !w.canJoin && <Text>closed</Text>}
+              </Box>
+            ))}
+          {nv.tab === 'explore' && ex.loaded && (ex.offset > 0 || ex.offset + ex.rows.length < ex.total) && (
+            <Box>
+              {ex.offset > 0 && <Button key="ex-prev" label="Prev" onPress={() => void loadExplore($, ex.search, Math.max(0, ex.offset - PAGE))} />}
+              <Text>{` ${ex.offset + 1}–${ex.offset + ex.rows.length} of ${ex.total} `}</Text>
+              {ex.offset + ex.rows.length < ex.total && <Button key="ex-next" label="Next" onPress={() => void loadExplore($, ex.search, ex.offset + PAGE)} />}
+            </Box>
+          )}
+        </Box>
+      )
+    }
+    if (v.phase === 'signed-in' && c.screen !== 'chat' && nv.screen === 'people') {
+      const pp = nv.people
+      return (
+        <Box flexDirection="column">
+          <Box>
+            <Text bold color={BRAND}>People</Text>
+            <Button key="nav-back" label=" Back" onPress={() => void goTo($, 'home')} />
+          </Box>
+          <Input
+            key="pp-search"
+            placeholder="Search pilots…"
+            value={pp.query}
+            submitLabel="search"
+            onInput={(t) => void setPeopleText($, t)}
+            onSubmit={(t) => void loadPeople($, t.trim(), 0)}
+          />
+          {nv.note !== '' && <Text bold>{nv.note}</Text>}
+          {!pp.loaded && <Text>Loading…</Text>}
+          {pp.loaded && pp.rows.length === 0 && <Text>No one found.</Text>}
+          {pp.rows.map((p) => (
+            <Box>
+              <Text>{`${p.name} `}</Text>
+              {pp.following.includes(p.wallet) ? (
+                <Button key={`pp-unfollow-${p.wallet}`} label="Unfollow" onPress={() => void toggleFollow($, p)} />
+              ) : (
+                <Button key={`pp-follow-${p.wallet}`} label="Follow" variant="primary" onPress={() => void toggleFollow($, p)} />
+              )}
+              {pp.following.includes(p.wallet) && <Text>{' · following'}</Text>}
+            </Box>
+          ))}
+          {pp.loaded && (pp.offset > 0 || pp.more) && (
+            <Box>
+              {pp.offset > 0 && <Button key="pp-prev" label="Prev" onPress={() => void loadPeople($, pp.query, Math.max(0, pp.offset - PAGE))} />}
+              {pp.more && <Button key="pp-next" label="Next" onPress={() => void loadPeople($, pp.query, pp.offset + PAGE)} />}
+            </Box>
+          )}
+        </Box>
+      )
+    }
     if (v.phase === 'signed-in' && c.screen === 'chat') {
       const room = Math.max(3, (e.viewport?.rows ?? 24) - 6)
       const shown = c.messages.slice(-room)
@@ -597,7 +1046,7 @@ export const register: Register = (on) => {
     }
     return (
       <Box flexDirection="column">
-        <Text bold color={BRAND}>HiveOp</Text>
+        <Text bold color={BRAND}>{v.phase === 'signed-in' ? `HiveOp · ${v.name ?? 'you'}` : 'HiveOp'}</Text>
         {v.phase === 'signed-out' && (
           <Box flexDirection="column">
             <Text>Sign in with your HiveOp account.</Text>
@@ -614,9 +1063,17 @@ export const register: Register = (on) => {
         )}
         {v.phase === 'signed-in' && (
           <Box flexDirection="column">
-            <Text>Signed in as <Text bold color={BRAND}>{v.name ?? 'you'}</Text></Text>
-            <Button key="open-chat" label={c.unread > 0 ? `Chat · ${c.unread} new` : 'Chat'} variant="primary" onPress={() => void showChat($)} />
-            <Button key="sign-out" label="Sign out" onPress={() => void signOut($, mem)} />
+            <Box>
+              <Button key="open-chat" label={c.unread > 0 ? `Chat · ${c.unread} new` : 'Chat'} variant="primary" onPress={() => void showChat($)} />
+              <Button key="home-work" label="Work here · soon" onPress={() => $.ui.toast('Work here is coming soon')} />
+              <Button key="home-claim" label="Claim next · soon" onPress={() => $.ui.toast('Claim next is coming soon')} />
+            </Box>
+            <Box>
+              <Button key="home-workspaces" label="Workspaces" onPress={() => void goTo($, 'workspaces')} />
+              <Button key="home-people" label="People" onPress={() => void goTo($, 'people')} />
+              <Button key="sign-out" label="Sign out" onPress={() => void signOut($, mem)} />
+            </Box>
+            {nv.band === 'hidden' && <Button key="home-show-band" label="Show band" onPress={() => void setBand($, 'shown')} />}
           </Box>
         )}
         {v.phase === 'ended' && (
@@ -625,6 +1082,7 @@ export const register: Register = (on) => {
             {v.reason !== 'not-open' && <Button key="retry" label="Sign in" variant="primary" onPress={() => void signIn($, mem)} />}
           </Box>
         )}
+        {v.phase !== 'signed-in' && nv.band === 'hidden' && <Button key="home-show-band" label="Show band" onPress={() => void setBand($, 'shown')} />}
       </Box>
     )
   })
@@ -643,6 +1101,7 @@ function sayText(out: SendOutcome, c: ChatView): string {
 async function showChat($: Engine) {
   const opened = await $.ui.open({ id: PANE, title: 'HiveOp' })
   await ensureLoaded($)
+  await setNav($, { screen: 'home' })
   if (opened.isPlaced) await openChat($)
   else await logRecent($)
 }
@@ -656,17 +1115,32 @@ async function signInIfAsked($: Engine, mem: Mem, view: AuthView, sub: string): 
 async function narrow($: Engine, mem: Mem, view: AuthView): Promise<string> {
   if (view.phase === 'pairing') return `HiveOp code ${view.code}. Approve at ${view.link}`
   if (view.phase === 'signed-in') {
-    const pick = await $.ui.ask(`HiveOp · ${view.name ?? 'signed in'}`, ['Chat', 'Sign out', 'Close']).catch(() => 'Close')
-    if (pick === 'Chat') {
-      await ensureLoaded($)
-      await logRecent($)
-      return 'Opened chat.'
+    for (;;) {
+      const nv = await read($, nav)
+      const pick = await ask($, `HiveOp · ${view.name ?? 'signed in'}`, ['Chat', 'Workspaces', 'People', 'More'])
+      if (pick === 'Chat') {
+        await ensureLoaded($)
+        await logRecent($)
+        return 'Opened chat.'
+      }
+      if (pick === 'Workspaces') await narrowWorkspaces($)
+      else if (pick === 'People') await narrowPeople($)
+      else if (pick === 'More') {
+        const bandWord = nv.band === 'hidden' ? 'Show band' : 'Hide band'
+        const more = await ask($, 'More', [bandWord, 'Sign out', 'Work here · soon', 'Claim next · soon'])
+        if (more === bandWord) {
+          await setBand($, nv.band === 'hidden' ? 'shown' : 'hidden')
+          return 'Done.'
+        }
+        if (more === 'Sign out') {
+          await signOut($, mem)
+          return 'Signed out of HiveOp on this computer.'
+        }
+        if (more === 'Work here · soon' || more === 'Claim next · soon') $.ui.log('Coming soon.')
+        continue
+      } else return `HiveOp · ${view.name ?? 'signed in'}`
+      return 'Done.'
     }
-    if (pick === 'Sign out') {
-      await signOut($, mem)
-      return 'Signed out of HiveOp on this computer.'
-    }
-    return `HiveOp · ${view.name ?? 'signed in'}`
   }
   const pick = await $.ui.ask(view.phase === 'ended' ? ENDED_TEXT[view.reason] + ' Sign in?' : 'HiveOp: sign in?', ['Sign in', 'Not now']).catch(
     () => 'Not now',

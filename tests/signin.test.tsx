@@ -36,6 +36,12 @@ function world(on: any, start: Partial<Omit<World, 'clock'>> = {}): World {
     ...start,
   }
   mock.env(on, { HOME, HIVEOP_API_URL: 'https://api.test/api/v1' })
+  const store = new Map<string, unknown>()
+  on('store.get', (_: unknown, e: any) => ({ value: store.get(e.key) }))
+  on('store.set', (_: unknown, e: any) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
   on('command.register', () => ({ value: { command: 'hiveop' } }))
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
   on('process.run', (_: unknown, e: any) => {
