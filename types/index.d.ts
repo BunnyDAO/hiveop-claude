@@ -8,7 +8,12 @@ export type AuthView =
 
 /** One chat line as the pane draws it. */
 // `mine`: sent by the signed-in person themselves (not by one of their agents).
-export type ChatMsg = { id: string; name: string; text: string; at: number; mine: boolean }
+// `who`: the run key (same person = same value; agents are their own). `photo`: the wallet whose photo to fetch, '' for none.
+// `color`: the person's HiveOp colour when the server sent one, else null (brand cyan).
+export type ChatMsg = { id: string; name: string; text: string; at: number; mine: boolean; who: string; photo: string; color: string | null }
+
+/** Profile photos by wallet (hcp-21): base64 PNG bytes, or none. Other people's pictures: pane only. */
+export type PhotosView = { byWallet: Record<string, { state: 'loading' | 'ok' | 'none'; png: string | null }> }
 
 /** The send box under the messages. */
 export type SendState =
@@ -86,6 +91,6 @@ export type SeatView = {
 
 declare module 'claude-code' {
   interface PluginState {
-    hiveop: { auth: Shaped<AuthView>; chat: Shaped<ChatView>; nav: Shaped<NavView>; work: Shaped<WorkView>; seat: Shaped<SeatView> }
+    hiveop: { auth: Shaped<AuthView>; chat: Shaped<ChatView>; nav: Shaped<NavView>; work: Shaped<WorkView>; seat: Shaped<SeatView>; photos: Shaped<PhotosView> }
   }
 }

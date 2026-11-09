@@ -183,6 +183,22 @@ export async function fetchMe($: Engine): Promise<Me> {
   return { state: 'ok', name, wallet }
 }
 
+/**
+ * One person's 64px photo as base64 PNG bytes, or null (no photo, not visible, blocked, offline).
+ * The host's fetch is text-only, so the server sends base64 text (?encoding=base64).
+ */
+export async function fetchAvatar($: Engine, wallet: string): Promise<string | null> {
+  const key = await loadKey($)
+  if (!key) return null
+  try {
+    const res = await $.http.fetch(`${await apiBase($)}/users/${encodeURIComponent(wallet)}/avatar.png?encoding=base64`, { headers: headers(key) })
+    const text = res.text.trim()
+    return res.ok && text.length > 0 && text.length <= 60_000 && /^[A-Za-z0-9+/]+=*$/.test(text) ? text : null
+  } catch {
+    return null
+  }
+}
+
 // ── workspaces and people (hcp-10) ──
 
 

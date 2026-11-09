@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface as Engine, Register } from 'claude-code'
+import type { Elements, EngineInterface as Engine, Register } from 'claude-code'
 
-import type { AuthView, ChatMsg, ChatTab, ChatView, InviteRow, NavView, PilotRow, SeatView, WorkView, WsRow } from '../types'
+import type { AuthView, ChatMsg, ChatTab, ChatView, InviteRow, NavView, PhotosView, PilotRow, SeatView, WorkView, WsRow } from '../types'
 import {
   type Fetched,
   acceptInvite,
@@ -12,6 +12,7 @@ import {
   fetchWorkSummary,
   fetchMe,
   folderKey,
+  fetchAvatar,
   followingAmong,
   forgetKey,
   gitRemote,
@@ -45,7 +46,9 @@ const EMPTY_CHAT: ChatView = {
   send: { phase: 'idle' },
 }
 const auth = atom({ plugin: 'hiveop', key: 'auth' } as const, { phase: 'signed-out' } as AuthView, { shape: 'auth-1' })
-const chat = atom({ plugin: 'hiveop', key: 'chat' } as const, EMPTY_CHAT, { shape: 'chat-2' })
+const chat = atom({ plugin: 'hiveop', key: 'chat' } as const, EMPTY_CHAT, { shape: 'chat-3' })
+const EMPTY_PHOTOS: PhotosView = { byWallet: {} }
+const photos = atom({ plugin: 'hiveop', key: 'photos' } as const, EMPTY_PHOTOS, { shape: 'photos-1' })
 const EMPTY_NAV: NavView = {
   screen: 'home',
   tab: 'mine',
@@ -105,6 +108,7 @@ function sameWallet(a: string | null | undefined, b: string | null | undefined):
 }
 
 const SELF_LABEL = 'You'
+const AV_COLS = 4
 
 function toMsg(raw: unknown, me: string | null): ChatMsg | null {
   if (!raw || typeof raw !== 'object') return null
@@ -117,7 +121,57 @@ function toMsg(raw: unknown, me: string | null): ChatMsg | null {
   const mine = !str(meta.agentId) && sameWallet(str(m.senderWallet), me)
   const name = mine ? SELF_LABEL : str(meta.agentName).trim() || str(m.senderDisplayName).trim() || 'member'
   const at = Date.parse(str(m.createdAt)) || 0
-  return { id, name, text, at, mine }
+  const agentId = str(meta.agentId)
+  const wallet = str(m.senderWallet)
+  // The run key: one person, however the wallet is spelled; an agent is its own sender and has no photo.
+  const who = mine ? 'self' : agentId ? `agent:${agentId}` : bareWallet(wallet) || `name:${name}`
+  const photo = agentId ? '' : mine ? (me ?? wallet) : wallet
+  const color = /^#[0-9a-fA-F]{6}$/.test(str(meta.agentColor)) ? str(meta.agentColor) : null
+  return { id, name, text, at, mine, who, photo, color }
+}
+
+function bareWallet(w: string): string {
+  return w.startsWith('email:') ? w.slice(6) : w
+}
+
+// ── profile photos (hcp-21) ──
+// Each person's photo is fetched at most once per session (a failure is cached too).
+// The bytes live in this atom for the pane only: never in command output or the prompt.
+
+const photoAsked = new Set<string>()
+const PHOTO_BATCH = 6
+
+async function ensurePhotos($: Engine): Promise<void> {
+  const c = await read($, chat)
+  const want: string[] = []
+  const seenKeys = new Set<string>()
+  for (const m of c.messages) {
+    if (!m.photo) continue
+    const k = bareWallet(m.photo)
+    if (photoAsked.has(k) || seenKeys.has(k)) continue
+    seenKeys.add(k)
+    want.push(m.photo)
+  }
+  const batch = want.slice(0, PHOTO_BATCH)
+  if (batch.length === 0) return
+  for (const w of batch) photoAsked.add(bareWallet(w))
+  await update($, photos, (p) => ({ byWallet: { ...p.byWallet, ...Object.fromEntries(batch.map((w) => [bareWallet(w), { state: 'loading', png: null }])) } }) as PhotosView)
+  for (const w of batch) {
+    const png = await fetchAvatar($, w)
+    await update($, photos, (p) => ({ byWallet: { ...p.byWallet, [bareWallet(w)]: { state: png ? 'ok' : 'none', png } } }) as PhotosView)
+  }
+  if (want.length > batch.length) await ensurePhotos($)
+}
+
+async function resetPhotos($: Engine): Promise<void> {
+  photoAsked.clear()
+  await update($, photos, () => EMPTY_PHOTOS)
+}
+
+function initialsOf(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean)
+  const letters = words.length > 1 ? [words[0]!, words[words.length - 1]!].map((w) => w[0]!) : [(words[0] ?? '?').slice(0, 1)]
+  return letters.join('').toUpperCase()
 }
 
 function merge(list: ChatMsg[], incoming: ChatMsg[]): ChatMsg[] {
@@ -303,7 +357,7 @@ async function sendChat($: Engine, mem: ChatMem, raw: string): Promise<SendOutco
     return 'failed'
   }
   const posted = toMsg(r.body?.message, v.me)
-  const sent = posted ? { ...posted, name: SELF_LABEL, mine: true } : null
+  const sent = posted ? { ...posted, name: SELF_LABEL, mine: true, who: 'self', photo: v.me ?? posted.photo } : null
   await update($, chat, (c) => {
     if (!sent) return { ...c, send: { phase: 'idle' } } as ChatView
     // The sync event can beat the reply: then it was counted as unread, and it is ours.
@@ -1097,6 +1151,7 @@ async function signOut($: Engine, mem: Mem) {
   await forgetKey($)
   await update($, auth, () => ({ phase: 'signed-out' }) as AuthView)
   await update($, chat, () => EMPTY_CHAT)
+  await resetPhotos($)
   await update($, work, () => EMPTY_WORK)
   await resetNav($)
 }
@@ -1135,6 +1190,7 @@ export const register: Register = (on) => {
     await $.command.register({ name: 'hiveop', description: 'HiveOp: sign in, chat, your account in Claude Code' })
     await $.command.register({ name: 'say', description: 'Say something in your HiveOp workspace chat', argumentHint: '<message>' })
     await restoreNav($)
+    await resetPhotos($)
     sm.cwd = e.cwd
     sm.folderKey = folderKey(e.cwd)
     try {
@@ -1263,6 +1319,10 @@ export const register: Register = (on) => {
     const wk = await read($, work)
     const st = await read($, seat)
     const { Box, Button, Input, Text } = $.ui.resolve(e)
+    // Image exists on the terminal surface only; everywhere else the initials stand in.
+    const Img = e.surface === 'terminal' ? ($.ui.resolve(e) as Partial<Elements['terminal']>).Image : undefined
+    const ph = await read($, photos)
+    if (v.phase === 'signed-in' && c.screen === 'chat') void ensurePhotos($)
     const room = Math.max(3, (e.viewport?.rows ?? 24) - 9)
     if (v.phase === 'signed-in' && c.screen !== 'chat' && nv.screen === 'workspaces') {
       const ex = nv.explore
@@ -1397,15 +1457,30 @@ export const register: Register = (on) => {
           {!c.workspace && <Text>No chat open.</Text>}
           {c.status === 'loading' && c.messages.length === 0 && <Text>Loading…</Text>}
           {c.status === 'ready' && c.messages.length === 0 && <Text>No messages yet.</Text>}
-          {shown.map((m) => (
-            <Box flexDirection="column">
-              {newCount > 0 && m.id === c.firstNewId && <Text color={BRAND}>{`── ${newCount} new ──`}</Text>}
-              <Text>
-                <Text bold color={m.mine ? undefined : BRAND}>{m.name}</Text>
-                {` · ${timeOf(m.at)} · ${m.text}`}
-              </Text>
-            </Box>
-          ))}
+          {shown.map((m, i) => {
+            // A photo (or the initials) once per run of messages by the same person.
+            const first = i === 0 || shown[i - 1]!.who !== m.who
+            const ini = initialsOf(m.mine ? (v.name ?? m.name) : m.name)
+            const pic = m.photo ? ph.byWallet[bareWallet(m.photo)] : undefined
+            return (
+              <Box flexDirection="column">
+                {newCount > 0 && m.id === c.firstNewId && <Text color={BRAND}>{`── ${newCount} new ──`}</Text>}
+                <Box>
+                  {first && Img && pic?.state === 'ok' && pic.png ? (
+                    <Box width={AV_COLS + 1}>
+                      <Img key={`av-${i}`} source={{ png: pic.png }} columns={AV_COLS} rows={1} alt={ini} />
+                    </Box>
+                  ) : (
+                    <Text bold color={m.color ?? BRAND}>{first ? `${ini}`.padEnd(AV_COLS + 1) : ' '.repeat(AV_COLS + 1)}</Text>
+                  )}
+                  <Text>
+                    <Text bold color={m.mine ? undefined : BRAND}>{m.name}</Text>
+                    {` · ${timeOf(m.at)} · ${m.text}`}
+                  </Text>
+                </Box>
+              </Box>
+            )
+          })}
           {c.send.phase === 'failed' && (
             <Box>
               <Text color="yellow">Not sent · </Text>
