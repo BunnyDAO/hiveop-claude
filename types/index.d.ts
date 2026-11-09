@@ -91,8 +91,21 @@ export type SeatView = {
   note: string
 }
 
+/** One of the person's own cloud agents. Pane only. */
+export type CloudAgent = { id: string; name: string; state: string; creditsPerHour: number }
+
+/**
+ * Cloud agents by workspace (hcp-25), the one open approval request, and one plain line.
+ * `request`: filed, waiting for the browser; `note`: Not approved. / Request expired. / the server's words.
+ */
+export type CloudView = {
+  byWs: Record<string, CloudAgent[]>
+  request: { wsId: string; id: string; url: string } | null
+  note: { wsId: string; text: string } | null
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    hiveop: { auth: Shaped<AuthView>; chat: Shaped<ChatView>; nav: Shaped<NavView>; work: Shaped<WorkView>; seat: Shaped<SeatView>; photos: Shaped<PhotosView> }
+    hiveop: { auth: Shaped<AuthView>; chat: Shaped<ChatView>; nav: Shaped<NavView>; work: Shaped<WorkView>; seat: Shaped<SeatView>; photos: Shaped<PhotosView>; cloud: Shaped<CloudView> }
   }
 }

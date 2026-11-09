@@ -1,6 +1,6 @@
 import type { EngineInterface as Engine } from 'claude-code'
 
-import type { InviteRow, PilotRow, WsRow } from '../types'
+import type { CloudAgent, InviteRow, PilotRow, WsRow } from '../types'
 
 // The only code that talks to HiveOp. Everything takes `$` and is a top-level
 // function (the engine's validator rejects helpers that close over it).
@@ -369,4 +369,65 @@ export async function adoptSession($: Engine, wsId: string, folder: string, sess
 
 export async function leaveSession($: Engine, wsId: string, agentId: string): Promise<Fetched | null> {
   return hiveop($, `/workspaces/${encodeURIComponent(wsId)}/adopted-sessions/${encodeURIComponent(agentId)}/offline`, { method: 'POST' })
+}
+
+// ── cloud agents (hcp-25) ──
+
+const APP = 'https://app.hiveop.io'
+export type ApprovalState = 'pending' | 'approved' | 'denied' | 'expired'
+
+/** Where the person approves a filed request. */
+export function approvalUrl(id: string): string {
+  return `${APPROVAL_PAGE}/approve?id=${encodeURIComponent(id)}`
+}
+
+/** The workspace in the app, where its agents and terminals are. */
+export function workspaceUrl(wsId: string): string {
+  return `${APP}/hive/${encodeURIComponent(wsId)}`
+}
+
+/** File a cloud-run request (create, or wake when `agentId` is given). Nothing starts until the browser approves. */
+export async function fileCloudRun($: Engine, wsId: string, agentId?: string): Promise<{ id: string; expiresAt: string } | { fail: Fetched | null }> {
+  const body: Record<string, string> = { kind: 'cloud_run', workspaceId: wsId }
+  if (agentId) body.agentId = agentId
+  const r = await hiveop($, '/me/plugin-approvals', { method: 'POST', body })
+  const a = r?.body?.approval as { id?: unknown; expiresAt?: unknown } | undefined
+  if (!r || !r.ok || !a || !s(a.id)) return { fail: r }
+  return { id: s(a.id), expiresAt: s(a.expiresAt) }
+}
+
+export async function pollApproval($: Engine, id: string): Promise<{ state: ApprovalState } | { state: 'unreachable' }> {
+  const r = await hiveop($, `/me/plugin-approvals/${encodeURIComponent(id)}`)
+  const st = (r?.body?.approval as { state?: unknown } | undefined)?.state
+  if (r?.ok && (st === 'pending' || st === 'approved' || st === 'denied' || st === 'expired')) return { state: st }
+  return { state: 'unreachable' }
+}
+
+/** The person's own cloud agents in one workspace; null when it could not be read. */
+export async function listCloudAgents($: Engine, wsId: string): Promise<CloudAgent[] | null> {
+  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/cloud-agents`)
+  if (!r || !r.ok || !Array.isArray(r.body?.agents)) return null
+  return (r.body!.agents as Array<Record<string, unknown>>)
+    .filter((a) => s(a?.id))
+    .map((a) => ({
+      id: s(a.id),
+      name: s(a.name).trim() || 'Claude',
+      state: s(a.state) || 'asleep',
+      creditsPerHour: typeof a.creditsPerHour === 'number' && Number.isFinite(a.creditsPerHour) ? a.creditsPerHour : 0,
+    }))
+}
+
+/** Stopping spend never needs approval. */
+export async function sleepCloudAgent($: Engine, agentId: string): Promise<Fetched | null> {
+  return hiveop($, `/me/cloud-agents/${encodeURIComponent(agentId)}/sleep`, { method: 'POST' })
+}
+
+/** Opens a page in the browser; false when the computer would not. */
+export async function openInBrowser($: Engine, url: string): Promise<boolean> {
+  try {
+    const r = await $.process.run(['open', url])
+    return r.exitCode === 0
+  } catch {
+    return false
+  }
 }

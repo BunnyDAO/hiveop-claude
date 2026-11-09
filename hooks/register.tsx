@@ -1,15 +1,17 @@
 import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface as Engine, Register } from 'claude-code'
 
-import type { AuthView, ChatMsg, ChatTab, ChatView, InviteRow, NavView, PhotosView, PilotRow, SeatView, WorkView, WsRow } from '../types'
+import type { AuthView, ChatMsg, CloudAgent, CloudView, ChatTab, ChatView, InviteRow, NavView, PhotosView, PilotRow, SeatView, WorkView, WsRow } from '../types'
 import {
   type Fetched,
   acceptInvite,
+  approvalUrl,
   adoptSession,
   claimIssue,
   computerName,
   declineInvite,
   fetchWorkSummary,
+  fileCloudRun,
   fetchMe,
   folderKey,
   fetchAvatar,
@@ -19,18 +21,23 @@ import {
   hiveop,
   joinWorkspace,
   leaveSession,
+  listCloudAgents,
   listExplore,
   listInvites,
   listMine,
   listPilots,
   loadKey,
   matchWorkspaces,
+  openInBrowser,
+  pollApproval,
   pollPairing,
   refusal,
   requestToJoin,
   saveKey,
   setFollow,
+  sleepCloudAgent,
   startPairing,
+  workspaceUrl,
 } from './client'
 import { LOGO_PNG } from './logo'
 import { chooseCloneFolder, cloneRepo, cloneableUrl, inlinePluginDir, normRemote, openFolder, rememberClone, scanClones, takeJoinOnOpen, writeJoinOnOpen } from './launch'
@@ -67,6 +74,8 @@ const EMPTY_WORK: WorkView = { workspaceId: null, loaded: false, ready: 0, inPro
 const work = atom({ plugin: 'hiveop', key: 'work' } as const, EMPTY_WORK, { shape: 'work-1' })
 const EMPTY_SEAT: SeatView = { folder: 'unchecked', target: null, auto: false, seat: null, busy: false, note: '' }
 const seat = atom({ plugin: 'hiveop', key: 'seat' } as const, EMPTY_SEAT, { shape: 'seat-1' })
+const EMPTY_CLOUD: CloudView = { byWs: {}, request: null, note: null }
+const cloud = atom({ plugin: 'hiveop', key: 'cloud' } as const, EMPTY_CLOUD, { shape: 'cloud-1' })
 
 // Chat for the person's workspace, and the one sync loop that keeps it live.
 // The server rate-limits at 20/min: ONE request in flight, a floor between
@@ -687,6 +696,7 @@ async function loadMine($: Engine): Promise<void> {
     return
   }
   await setNav($, { mine: out.rows })
+  await refreshCloudVisible($, out.rows)
   try {
     const home = (await $.env.get('HOME')) ?? ''
     await setNav($, { clones: await scanClones($, sm.cwd, home) })
@@ -1104,6 +1114,123 @@ async function workHere($: Engine): Promise<string> {
   return after.seat ? `Joined ${oneLine(after.seat.workspaceName, 40)}.` : after.note || 'Done.'
 }
 
+// ── cloud agents (hcp-25) ──
+// Run in cloud files a request; the person approves in the browser. Polling is
+// bounded by the request's expiry. Status refresh is one slow timer (30s) over
+// the workspaces known to have agents, plus one read when the list opens.
+
+const CLOUD_POLL_MS = 2000
+const CLOUD_SLOW_MS = 30_000
+const CLOUD_MAX_FAILURES = 5
+const CLOUD_LOOK = 8
+const cloudMem: { poll: Cancel | null; slow: Cancel | null; failures: number } = { poll: null, slow: null, failures: 0 }
+
+async function setCloudNote($: Engine, wsId: string, text: string): Promise<void> {
+  await update($, cloud, (c) => ({ ...c, request: null, note: { wsId, text } }) as CloudView)
+}
+
+async function refreshCloud($: Engine, wsIds: string[]): Promise<void> {
+  for (const id of wsIds) {
+    const agents = await listCloudAgents($, id)
+    if (agents === null) continue
+    await update($, cloud, (c) => ({ ...c, byWs: { ...c.byWs, [id]: agents } }) as CloudView)
+  }
+}
+
+/** Status for the rows on screen: one read each, at most CLOUD_LOOK. */
+async function refreshCloudVisible($: Engine, rows: WsRow[]): Promise<void> {
+  await refreshCloud($, rows.filter((w) => w.kind !== 'local').slice(0, CLOUD_LOOK).map((w) => w.id))
+}
+
+function stopCloudPoll(): void {
+  cloudMem.poll?.cancel()
+  cloudMem.poll = null
+  cloudMem.failures = 0
+}
+
+function stopCloud(): void {
+  stopCloudPoll()
+  cloudMem.slow?.cancel()
+  cloudMem.slow = null
+}
+
+function startCloudSlow($: Engine): void {
+  cloudMem.slow?.cancel()
+  cloudMem.slow = $.clock.every(CLOUD_SLOW_MS, () => {
+    void (async () => {
+      const known = Object.entries((await read($, cloud)).byWs).filter(([, a]) => a.length > 0).map(([id]) => id)
+      if (known.length > 0) await refreshCloud($, known)
+    })()
+  })
+}
+
+async function cloudTick($: Engine, wsId: string, approvalId: string, deadline: number): Promise<void> {
+  if (!cloudMem.poll) return
+  if ((await $.clock.now()) >= deadline) {
+    stopCloudPoll()
+    await setCloudNote($, wsId, 'Request expired.')
+    return
+  }
+  const r = await pollApproval($, approvalId)
+  if (!cloudMem.poll) return // cancelled while the request was out
+  if (r.state === 'pending') {
+    cloudMem.failures = 0
+    return
+  }
+  if (r.state === 'unreachable') {
+    cloudMem.failures += 1
+    if (cloudMem.failures >= CLOUD_MAX_FAILURES) {
+      stopCloudPoll()
+      await setCloudNote($, wsId, "Couldn't reach HiveOp.")
+    }
+    return
+  }
+  stopCloudPoll()
+  if (r.state === 'approved') {
+    await update($, cloud, (c) => ({ ...c, request: null, note: null }) as CloudView)
+    await refreshCloud($, [wsId])
+    return
+  }
+  await setCloudNote($, wsId, r.state === 'denied' ? 'Not approved.' : 'Request expired.')
+}
+
+/** Run in cloud (no agentId) or Wake (agentId): file the request, open the approval page, wait. */
+async function runInCloud($: Engine, wsId: string, agentId?: string): Promise<void> {
+  if (cloudMem.poll) return // one request at a time
+  const out = await fileCloudRun($, wsId, agentId)
+  if ('fail' in out) {
+    await setCloudNote($, wsId, refusal(out.fail))
+    return
+  }
+  const url = approvalUrl(out.id)
+  await update($, cloud, (c) => ({ ...c, request: { wsId, id: out.id, url }, note: null }) as CloudView)
+  await openInBrowser($, url)
+  const deadline = Date.parse(out.expiresAt) || (await $.clock.now()) + 10 * 60_000
+  cloudMem.failures = 0
+  cloudMem.poll = $.clock.every(CLOUD_POLL_MS, () => {
+    void cloudTick($, wsId, out.id, deadline)
+  })
+}
+
+async function sleepCloud($: Engine, wsId: string, agent: CloudAgent): Promise<void> {
+  const r = await sleepCloudAgent($, agent.id)
+  if (!r || !r.ok) {
+    await setCloudNote($, wsId, refusal(r))
+    return
+  }
+  await update($, cloud, (c) => ({ ...c, note: null }) as CloudView)
+  await refreshCloud($, [wsId])
+}
+
+async function openCloudTerminal($: Engine, wsId: string): Promise<void> {
+  const url = workspaceUrl(wsId)
+  if (!(await openInBrowser($, url))) await setCloudNote($, wsId, url)
+}
+
+function cloudLine(a: CloudAgent): string {
+  return `${oneLine(a.name, 24)} · ${a.state} · ${a.creditsPerHour} cr/hr`
+}
+
 const POLL_MS = 3000
 const MAX_POLL_FAILURES = 5
 
@@ -1138,6 +1265,7 @@ async function finishSignedIn($: Engine, mem: Mem) {
   await update($, chat, (c) => ({ ...c, me: me.state === 'ok' ? me.wallet : c.me }))
   await restoreTabs($)
   startChat($, mem.chat)
+  startCloudSlow($)
   await detectFolder($)
 }
 
@@ -1200,6 +1328,8 @@ async function signOut($: Engine, mem: Mem) {
   await update($, seat, (v) => ({ ...EMPTY_SEAT, auto: v.auto }) as SeatView)
   stopPolling(mem)
   stopChat(mem.chat)
+  stopCloud()
+  await update($, cloud, () => EMPTY_CLOUD)
   await forgetKey($)
   await update($, auth, () => ({ phase: 'signed-out' }) as AuthView)
   await update($, chat, () => EMPTY_CHAT)
@@ -1260,6 +1390,8 @@ export const register: Register = (on) => {
     await $.command.register({ name: 'hiveop', description: 'HiveOp: sign in, chat, your account in Claude Code' })
     await $.command.register({ name: 'say', description: 'Say something in your HiveOp workspace chat', argumentHint: '<message>' })
     await restoreNav($)
+    stopCloud()
+    await update($, cloud, () => EMPTY_CLOUD)
     await resetPhotos($)
     sm.cwd = e.cwd
     sm.folderKey = folderKey(e.cwd)
@@ -1405,6 +1537,7 @@ export const register: Register = (on) => {
     const { Box, Button, Input, Text } = ui
     // Image exists on the terminal surface only; everywhere else the initials stand in.
     const Img = e.surface === 'terminal' ? (ui as Partial<Elements['terminal']>).Image : undefined
+    const cl = await read($, cloud)
     const ph = await read($, photos)
     if (v.phase === 'signed-in' && c.screen === 'chat') void ensurePhotos($)
     const cols = e.props.bodyColumns ?? 60
@@ -1436,6 +1569,7 @@ export const register: Register = (on) => {
             {nv.tab === 'mine' && nv.mine !== null && nv.mine.length === 0 && <Text>No workspaces yet. Create one at app.hiveop.io.</Text>}
             {nv.tab === 'mine' &&
               (nv.mine ?? []).slice(0, room).map((w) => (
+                <Box key={`ws-${w.id}`} flexDirection="column">
                 <Box justifyContent="space-between" gap={2}>
                   <Text wrap="truncate-end">
                     <Text bold>{w.name}</Text>
@@ -1454,7 +1588,29 @@ export const register: Register = (on) => {
                       return null
                     })()}
                     <Button key={`ws-chat-${w.id}`} label="Open chat" plain onPress={() => void openRoom($, w)} />
+                    {w.kind !== 'local' && <Button key={`ws-cloud-${w.id}`} label="Run in cloud" plain onPress={() => void runInCloud($, w.id)} />}
+                    {w.kind !== 'local' && <Text>HiveOp credits</Text>}
                   </Box>
+                </Box>
+                {(cl.byWs[w.id] ?? []).map((a) => (
+                  <Box key={`cloud-row-${a.id}`} paddingLeft={2} gap={2}>
+                    <Text wrap="truncate-end">{cloudLine(a)}</Text>
+                    {(a.state === 'awake' || a.state === 'waking') && <Button key={`cloud-sleep-${a.id}`} label="Sleep" plain onPress={() => void sleepCloud($, w.id, a)} />}
+                    {a.state !== 'awake' && a.state !== 'waking' && <Button key={`cloud-wake-${a.id}`} label="Wake" plain onPress={() => void runInCloud($, w.id, a.id)} />}
+                    <Button key={`cloud-term-${a.id}`} label="Open terminal" plain onPress={() => void openCloudTerminal($, w.id)} />
+                  </Box>
+                ))}
+                {cl.request?.wsId === w.id && (
+                  <Box paddingLeft={2} flexDirection="column">
+                    <Text bold>Approve in your browser…</Text>
+                    <Text wrap="truncate-end">{cl.request.url}</Text>
+                  </Box>
+                )}
+                {cl.note?.wsId === w.id && (
+                  <Box paddingLeft={2}>
+                    <Text bold>{cl.note.text}</Text>
+                  </Box>
+                )}
                 </Box>
               ))}
             {nv.tab === 'invites' && nv.invites === null && <Text>Loading…</Text>}
