@@ -930,14 +930,11 @@ async function workHere($: Engine): Promise<string> {
   } else if (v.folder === 'joinable' && v.target) {
     await requestSeatAccess($)
   } else {
-    const out = await listMine($)
-    if ('fail' in out) return refusal(out.fail)
-    if (out.rows.length === 0) return 'No workspaces yet. Create one at app.hiveop.io.'
-    const pick = await pickFrom($, 'Work in which workspace?', out.rows.map((w) => w.name))
-    if (!pick || !('item' in pick)) return 'Not joined.'
-    const ws = out.rows[pick.item]
-    if (!ws) return 'Not joined.'
-    await joinSeat($, ws)
+    // The folder decides the workspace (PRD Δ 2026-11-09): never seat an agent in a
+    // workspace whose code isn't in this folder.
+    const note = "This folder isn't a workspace's repo. Open Claude Code in your workspace's folder to work there."
+    await setSeat($, { note })
+    return note
   }
   const after = await read($, seat)
   return after.seat ? `Joined ${oneLine(after.seat.workspaceName, 40)}.` : after.note || 'Done.'
