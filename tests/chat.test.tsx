@@ -60,7 +60,12 @@ function world(on: any, start: Partial<World> = {}): World {
     if (t === undefined) throw new Error('ENOENT')
     return { value: t }
   })
-  const store = new Map<string, unknown>()
+  // An open room, from the legacy single-workspace key: it migrates to the first tab.
+  const store = new Map<string, unknown>([['chat.workspace', { id: WS, name: 'Forge' }]])
+  on('store.delete', (_: unknown, e: any) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
   on('store.get', (_: unknown, e: any) => ({ value: store.get(e.key) }))
   on('store.set', (_: unknown, e: any) => {
     store.set(e.key, e.value)
@@ -102,13 +107,13 @@ const syncs = (w: World) => w.calls.filter((c) => c.url.includes('/me/sync') && 
 const posts = (w: World) => w.calls.filter((c) => c.method === 'POST')
 const start = async ($: any) => $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
-test('signed in: finds the room, loads history, then syncs one request at a time', async ($, on) => {
+test('signed in: opens the saved room, loads history, then syncs one request at a time', async ($, on) => {
   const w = world(on, { /* keyed in below */ })
   STORED.size // key present for every test
   await start($)
   await w.clock.advance(10)
   const urls = w.calls.map((c) => c.url.replace('https://api.test/api/v1', ''))
-  expect(urls).toContain('/workspaces')
+  expect(urls).not.toContain('/workspaces') // no room is picked for you
   expect(urls.some((u) => u.startsWith('/me/sync?clientId='))).toBe(true)
   expect(urls.some((u) => u.startsWith(`/workspaces/${WS}/chat?limit=`))).toBe(true)
   await w.clock.advance(60_000)

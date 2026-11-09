@@ -17,8 +17,13 @@ export type SendState =
   | { phase: 'limited'; seconds: number; text: string }
 
 /** The chat room the person sees. Messages are other people's words: never in command output. */
+export type ChatTab = { id: string; name: string; unread: number }
+
 export type ChatView = {
+  // The room being viewed: one of the open tabs.
   workspace: { id: string; name: string } | null
+  // Open chat rooms, one tab each. `unread` counts rooms out of view; the viewed room counts in `unread` below.
+  tabs: ChatTab[]
   status: 'loading' | 'ready' | 'offline' | 'no-workspace'
   screen: 'home' | 'chat'
   messages: ChatMsg[]
@@ -45,15 +50,13 @@ export type NavView = {
   band: 'shown' | 'hidden'
   // One plain line: what just happened, or why the server said no.
   note: string
-  // The workspace chat and the band follow: its id.
-  current: string | null
   mine: WsRow[] | null
   invites: InviteRow[] | null
   explore: { search: string; rows: WsRow[]; offset: number; total: number; loaded: boolean }
   people: { query: string; rows: PilotRow[]; following: string[]; offset: number; more: boolean; loaded: boolean }
 }
 
-/** The work band: the current workspace's ready queue. Titles are other people's words: band, pane and toasts only. */
+/** The work band: the seat workspace's ready queue. Titles are other people's words: band, pane and toasts only. */
 export type WorkView = {
   workspaceId: string | null
   loaded: boolean

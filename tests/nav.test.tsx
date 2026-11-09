@@ -56,6 +56,10 @@ function world(on: any, start: Partial<World> = {}): World {
     w.store.set(e.key, e.value)
     return { value: undefined }
   })
+  on('store.delete', (_: unknown, e: any) => {
+    w.store.delete(e.key)
+    return { value: undefined }
+  })
   on('ui.open', () => ({ value: w.placed ? { isPlaced: true } : { isPlaced: false, reason: 'narrow' } }))
   on('ui.panes', () => ({ value: w.placed ? [{ id: 'hiveop', title: 'HiveOp', isShown: true, isFocused: false, isPlaced: true }] : [] }))
   on('ui.render', () => ({ type: 'Text', children: ['engine'] }))
@@ -141,44 +145,30 @@ test('home: header with the name and every button, on both surfaces', async ($, 
   }
 })
 
-test('workspaces: mine marks the current one; picking one persists and the chat follows', async ($, on) => {
+test('workspaces: Open chat adds a tab; no Use button, no global current workspace', async ($, on) => {
   const w = world(on)
   await start($)
   for (const surface of SURFACES) {
     const pane = await open($, surface)
     await pane.press({ key: 'home-workspaces' })
-    if (surface === 'desktop') {
-      expect(await text(pane)).toContain('● Anvil') // chosen in the terminal pass: one choice for the session
-    } else {
-      expect(await text(pane)).toContain('● Forge')
+    const listed = await text(pane)
+    expect(listed).not.toContain('ws-use-')
+    expect(listed).not.toContain('current')
+    expect(await pane.find({ key: 'ws-chat-w1' })).toBeDefined()
+    if (surface === 'terminal') {
       const syncStarts = w.calls.filter((c) => c.path.startsWith('/me/sync?clientId=')).length
-      await pane.press({ key: 'ws-use-w2' })
-      expect(w.store.get('chat.workspace')).toEqual({ id: 'w2', name: 'Anvil' })
+      await pane.press({ key: 'ws-chat-w2' })
       expect(w.calls.some((c) => c.path.startsWith('/workspaces/w2/chat'))).toBe(true)
-      expect(await text(pane)).toContain('● Anvil')
-      // The sync loop is global: choosing a room does not restart it.
+      expect(w.store.get('chat.tabs')).toEqual([{ id: 'w2', name: 'Anvil' }])
+      expect(w.store.has('chat.workspace')).toBe(false)
+      // The sync loop is global: opening a room does not restart it.
       expect(w.calls.filter((c) => c.path.startsWith('/me/sync?clientId=')).length).toBe(syncStarts)
-      // Chat shows the new room.
-      await pane.press({ key: 'nav-back' })
-      await pane.press({ key: 'open-chat' })
       const room = await text(pane)
       expect(room).toContain('#Anvil')
       expect(room).toContain('hello from w2')
-      expect(room).not.toContain('hello from w1')
     }
     await pane.unmount()
   }
-})
-
-test('the choice survives a new session', async ($, on) => {
-  const w = world(on, { store: new Map([['chat.workspace', { id: 'w2', name: 'Anvil' }]]) })
-  await start($)
-  await w.clock.advance(10)
-  const pane = await open($, 'terminal')
-  await pane.press({ key: 'home-workspaces' })
-  expect(await text(pane)).toContain('● Anvil')
-  expect(w.calls.some((c) => c.path.startsWith('/workspaces/w2/chat'))).toBe(true)
-  await pane.unmount()
 })
 
 test('invites: accept redeems with the token, decline sends the invite id', async ($, on) => {
@@ -315,10 +305,11 @@ test('narrow: pick-lists give the same choices; command output stays neutral', a
   const out = await $.command.run({ command: 'hiveop', args: '', ...RUN })
   expect(w.asked[0]!.options).toEqual(['Chat', 'Workspaces', 'People', 'More'])
   expect(w.asked[1]!.options).toEqual(['Mine', 'Invites', 'Explore', 'Back'])
-  expect(w.asked[2]!.options).toEqual(['Forge · current', 'Anvil', 'Back'])
+  expect(w.asked[2]!.options).toEqual(['Forge', 'Anvil', 'Back'])
   expect(JSON.stringify(out)).not.toMatch(/Forge|Anvil|Bea/)
-  expect(w.store.get('chat.workspace')).toEqual({ id: 'w2', name: 'Anvil' })
-  expect(w.logs.join('\n')).toContain('Now in Anvil.')
+  expect(w.store.get('chat.tabs')).toEqual([{ id: 'w2', name: 'Anvil' }])
+  expect(w.logs.join('\n')).toContain('#Anvil')
+  expect(w.logs.join('\n')).toContain('To code in it, open its folder and Join.')
 })
 
 test('narrow: follow someone, join a workspace, accept an invite; names only in notices', async ($, on) => {

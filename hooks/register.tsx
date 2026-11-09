@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
-import type { AuthView, ChatMsg, ChatView, InviteRow, NavView, PilotRow, SeatView, WorkView, WsRow } from '../types'
+import type { AuthView, ChatMsg, ChatTab, ChatView, InviteRow, NavView, PilotRow, SeatView, WorkView, WsRow } from '../types'
 import {
   type Fetched,
   acceptInvite,
@@ -34,6 +34,7 @@ import {
 
 const EMPTY_CHAT: ChatView = {
   workspace: null,
+  tabs: [],
   status: 'loading',
   screen: 'home',
   messages: [],
@@ -44,19 +45,18 @@ const EMPTY_CHAT: ChatView = {
   send: { phase: 'idle' },
 }
 const auth = atom({ plugin: 'hiveop', key: 'auth' } as const, { phase: 'signed-out' } as AuthView, { shape: 'auth-1' })
-const chat = atom({ plugin: 'hiveop', key: 'chat' } as const, EMPTY_CHAT, { shape: 'chat-1' })
+const chat = atom({ plugin: 'hiveop', key: 'chat' } as const, EMPTY_CHAT, { shape: 'chat-2' })
 const EMPTY_NAV: NavView = {
   screen: 'home',
   tab: 'mine',
   band: 'shown',
   note: '',
-  current: null,
   mine: null,
   invites: null,
   explore: { search: '', rows: [], offset: 0, total: 0, loaded: false },
   people: { query: '', rows: [], following: [], offset: 0, more: false, loaded: false },
 }
-const nav = atom({ plugin: 'hiveop', key: 'nav' } as const, EMPTY_NAV, { shape: 'nav-1' })
+const nav = atom({ plugin: 'hiveop', key: 'nav' } as const, EMPTY_NAV, { shape: 'nav-2' })
 const EMPTY_WORK: WorkView = { workspaceId: null, loaded: false, ready: 0, inProgress: 0, next: null, note: '', claiming: false }
 const work = atom({ plugin: 'hiveop', key: 'work' } as const, EMPTY_WORK, { shape: 'work-1' })
 const EMPTY_SEAT: SeatView = { folder: 'unchecked', target: null, auto: false, seat: null, busy: false, note: '' }
@@ -74,7 +74,8 @@ const MIN_GAP_MS = 3_500
 const MAX_BACKOFF_MS = 60_000
 const HISTORY = 40
 const KEEP = 200
-const STORE_WS = 'chat.workspace'
+const STORE_OLD_WS = 'chat.workspace' // hcp-10's global current workspace: migrated, then dropped
+const STORE_TABS = 'chat.tabs'
 
 type ChatMem = {
   gen: number
@@ -134,20 +135,43 @@ function timeOf(at: number): string {
 
 // ── workspace ──
 
-type Picked = { state: 'ok'; ws: { id: string; name: string } } | { state: 'none' } | { state: 'failed'; r: Fetched | null }
+// ── open rooms (tabs) ──
 
-/** The stored choice if it still exists, else the person's first workspace. */
-async function pickWorkspace($: Engine): Promise<Picked> {
-  const r = await hiveop($, '/workspaces')
-  if (!r || !r.ok) return { state: 'failed', r }
-  const list = Array.isArray(r.body?.workspaces) ? (r.body!.workspaces as Array<Record<string, unknown>>) : []
-  const rows = list.filter((w) => str(w.id)).map((w) => ({ id: str(w.id), name: str(w.name) || str(w.title) || 'workspace' }))
-  if (rows.length === 0) return { state: 'none' }
-  const stored = (await $.store.get(STORE_WS)) as { id?: unknown } | undefined
-  const hit = rows.find((w) => w.id === stored?.id)
-  const ws = hit ?? rows[0]!
-  if (!hit) await $.store.set(STORE_WS, ws)
-  return { state: 'ok', ws }
+const ROOM_LIMIT = 8
+
+function tabsOf(v: ChatView): { id: string; name: string }[] {
+  return v.tabs.map((t) => ({ id: t.id, name: t.name }))
+}
+
+/** Unread across every open room: the viewed one and the others. */
+function unreadTotal(v: ChatView): number {
+  return v.unread + v.tabs.reduce((n, t) => n + t.unread, 0)
+}
+
+async function saveTabs($: Engine, tabs: ChatTab[]): Promise<void> {
+  await $.store.set(STORE_TABS, tabs.map((t) => ({ id: t.id, name: t.name })))
+}
+
+/**
+ * Open rooms come back from the last session. hcp-10's single stored workspace
+ * becomes the first tab, and its key is dropped.
+ */
+async function restoreTabs($: Engine): Promise<void> {
+  const kept = await $.store.get(STORE_TABS)
+  const old = (await $.store.get(STORE_OLD_WS)) as { id?: unknown; name?: unknown } | undefined
+  const rooms: { id: string; name: string }[] = []
+  const add = (x: unknown) => {
+    const r = (x && typeof x === 'object' ? x : {}) as { id?: unknown; name?: unknown }
+    if (str(r.id) && !rooms.some((t) => t.id === r.id)) rooms.push({ id: str(r.id), name: str(r.name) || 'workspace' })
+  }
+  if (old !== undefined) {
+    add(old)
+    for (const t of Array.isArray(kept) ? kept : []) add(t)
+    await $.store.set(STORE_TABS, rooms)
+    await $.store.delete(STORE_OLD_WS)
+  } else for (const t of Array.isArray(kept) ? kept : []) add(t)
+  const tabs = rooms.slice(0, ROOM_LIMIT).map((t) => ({ ...t, unread: 0 }))
+  await update($, chat, (c) => ({ ...c, tabs, workspace: tabs[0] ? { id: tabs[0].id, name: tabs[0].name } : null, status: tabs[0] ? 'loading' : 'no-workspace', messages: [], unread: 0, firstNewId: null }) as ChatView)
 }
 
 async function loadHistory($: Engine, wsId: string, me: string | null): Promise<{ msgs: ChatMsg[] } | { r: Fetched | null }> {
@@ -167,26 +191,78 @@ async function isViewing($: Engine): Promise<boolean> {
 
 // ── what the person does ──
 
-/** Make sure a room and its recent messages are in the view; one fetch when they are not. */
+/** Make sure the viewed room's recent messages are in the view; one fetch when they are not. */
 async function ensureLoaded($: Engine): Promise<void> {
   const v = await read($, chat)
-  if (v.workspace && v.messages.length > 0) return
-  const p = await pickWorkspace($)
-  if (p.state === 'none') {
-    await update($, chat, (c) => ({ ...c, workspace: null, status: 'no-workspace' }) as ChatView)
+  if (!v.workspace) {
+    await update($, chat, (c) => ({ ...c, status: 'no-workspace' }) as ChatView)
     return
   }
-  if (p.state === 'failed') {
+  if (v.messages.length > 0) return
+  const wsId = v.workspace.id
+  const h = await loadHistory($, wsId, v.me)
+  if ((await read($, chat)).workspace?.id !== wsId) return // moved while this was out
+  if ('r' in h) {
     await update($, chat, (c) => ({ ...c, status: 'offline' }) as ChatView)
     return
   }
-  const h = await loadHistory($, p.ws.id, v.me)
-  if ('r' in h) {
-    await update($, chat, (c) => ({ ...c, workspace: p.ws, status: 'offline' }) as ChatView)
+  await update($, chat, (c) => ({ ...c, status: 'ready', messages: merge(c.messages, h.msgs) }) as ChatView)
+}
+
+/** Open a workspace's room as a tab (or switch to it) and show it. */
+async function openRoom($: Engine, ws: { id: string; name: string }): Promise<void> {
+  const before = await read($, chat)
+  const had = before.tabs.find((t) => t.id === ws.id)
+  if (!had && before.tabs.length >= ROOM_LIMIT) {
+    await setNav($, { note: 'Close a chat tab first.' })
     return
   }
-  await update($, chat, (c) => ({ ...c, workspace: p.ws, status: 'ready', messages: merge(c.workspace?.id === p.ws.id ? c.messages : [], h.msgs) }) as ChatView)
-  await refreshWork($)
+  const pending = had?.unread ?? 0
+  const ref = { id: ws.id, name: ws.name }
+  const tabs: ChatTab[] = had ? before.tabs : [...before.tabs, { ...ref, unread: 0 }]
+  const next = tabs.map((t) => (t.id === ws.id ? { ...t, unread: 0 } : t.id === before.workspace?.id ? { ...t, unread: before.unread } : t))
+  const same = before.workspace?.id === ws.id
+  await update($, chat, (c) =>
+    ({
+      ...c,
+      tabs: next,
+      screen: 'chat',
+      ...(same ? { unread: 0 } : { workspace: ref, status: 'loading', messages: [], unread: 0, firstNewId: null, draft: '', send: { phase: 'idle' } }),
+    }) as ChatView,
+  )
+  await setNav($, { screen: 'home', note: '' })
+  if (!had) await saveTabs($, next)
+  if (same) return
+  const h = await loadHistory($, ws.id, before.me)
+  if ((await read($, chat)).workspace?.id !== ws.id) return // switched again while this was out
+  if ('r' in h) {
+    await update($, chat, (c) => ({ ...c, status: 'offline' }) as ChatView)
+    return
+  }
+  await update($, chat, (c) => {
+    const msgs = merge([], h.msgs)
+    return { ...c, status: 'ready', messages: msgs, firstNewId: pending > 0 ? (msgs[msgs.length - pending]?.id ?? null) : null } as ChatView
+  })
+}
+
+/** Close a tab. Closing the viewed one moves to its neighbour. */
+async function closeRoom($: Engine, id: string): Promise<void> {
+  const v = await read($, chat)
+  const at = v.tabs.findIndex((t) => t.id === id)
+  if (at < 0) return
+  const rest = v.tabs.filter((t) => t.id !== id)
+  await saveTabs($, rest)
+  if (v.workspace?.id !== id) {
+    await update($, chat, (c) => ({ ...c, tabs: c.tabs.filter((t) => t.id !== id) }) as ChatView)
+    return
+  }
+  const near = rest[Math.min(at, rest.length - 1)]
+  if (!near) {
+    await update($, chat, (c) => ({ ...c, tabs: [], workspace: null, status: 'no-workspace', messages: [], unread: 0, firstNewId: null, draft: '', send: { phase: 'idle' }, screen: 'home' }) as ChatView)
+    return
+  }
+  await update($, chat, (c) => ({ ...c, tabs: c.tabs.filter((t) => t.id !== id), workspace: null, messages: [], unread: 0 }) as ChatView)
+  await openRoom($, near)
 }
 
 /** Show the chat in the pane: the unread become the "N new" marker. */
@@ -211,12 +287,8 @@ type SendOutcome = 'sent' | 'empty' | 'failed' | 'limited' | 'signed-out' | 'no-
 async function sendChat($: Engine, mem: ChatMem, raw: string): Promise<SendOutcome> {
   const text = raw.trim()
   if (!text) return 'empty'
-  let v = await read($, chat)
-  if (!v.workspace) {
-    await ensureLoaded($)
-    v = await read($, chat)
-  }
-  if (!v.workspace) return v.status === 'no-workspace' ? 'no-room' : 'failed'
+  const v = await read($, chat)
+  if (!v.workspace) return 'no-room'
   await update($, chat, (c) => ({ ...c, draft: '', send: { phase: 'idle' } }) as ChatView)
   const r = await hiveop($, `/workspaces/${encodeURIComponent(v.workspace.id)}/chat`, { method: 'POST', body: { content: text } })
   if (!r) return 'signed-out'
@@ -312,28 +384,18 @@ async function step($: Engine, mem: ChatMem, gen: number): Promise<void> {
   })
 }
 
-/** Find the room, take the head cursor, load recent history. Returns the delay before the next step. */
+/** Take the head cursor and load the viewed room's recent history. Returns the delay before the next step. */
 async function bootstrap($: Engine, mem: ChatMem): Promise<number> {
-  const p = await pickWorkspace($)
-  if (p.state === 'none') {
-    await update($, chat, (c) => ({ ...c, workspace: null, status: 'no-workspace' }) as ChatView)
-    return 60_000
-  }
-  if (p.state === 'failed') return failed($, mem, p.r)
   const head = await hiveop($, `/me/sync?clientId=${mem.clientId}`)
   if (!head || !head.ok || typeof head.body?.cursor !== 'string') return failed($, mem, head)
-  const me = (await read($, chat)).me
-  const h = await loadHistory($, p.ws.id, me)
-  if ('r' in h) return failed($, mem, h.r)
+  const v = await read($, chat)
+  if (v.workspace && v.messages.length === 0) {
+    const h = await loadHistory($, v.workspace.id, v.me)
+    if ('r' in h) return failed($, mem, h.r)
+    await update($, chat, (c) => (c.workspace?.id === v.workspace!.id ? ({ ...c, status: 'ready', messages: merge(c.messages, h.msgs) } as ChatView) : c))
+  }
   mem.cursor = head.body.cursor
   mem.failures = 0
-  await update($, chat, (c) => ({
-    ...c,
-    workspace: p.ws,
-    status: 'ready',
-    messages: merge(c.workspace?.id === p.ws.id ? c.messages : [], h.msgs),
-    unread: c.workspace?.id === p.ws.id ? c.unread : 0,
-  }) as ChatView)
   await refreshWork($)
   return 0
 }
@@ -361,10 +423,19 @@ async function syncOnce($: Engine, mem: ChatMem): Promise<number> {
   const v = await read($, chat)
   await onWorkEvents($, events, v.me)
   const incoming: ChatMsg[] = []
+  const elsewhere = new Map<string, number>()
   for (const ev of events) {
-    if (ev.type !== 'workspace:chat_message' || ev.workspaceId !== v.workspace?.id) continue
-    const m = toMsg(ev.message, v.me)
-    if (m) incoming.push(m)
+    if (ev.type !== 'workspace:chat_message') continue
+    if (ev.workspaceId === v.workspace?.id) {
+      const m = toMsg(ev.message, v.me)
+      if (m) incoming.push(m)
+    } else if (v.tabs.some((t) => t.id === ev.workspaceId)) {
+      const id = str(ev.workspaceId)
+      elsewhere.set(id, (elsewhere.get(id) ?? 0) + 1)
+    }
+  }
+  if (elsewhere.size > 0) {
+    await update($, chat, (c) => ({ ...c, tabs: c.tabs.map((t) => (elsewhere.has(t.id) ? { ...t, unread: t.unread + elsewhere.get(t.id)! } : t)) }) as ChatView)
   }
   if (incoming.length === 0) return 0
   const viewing = await isViewing($)
@@ -398,7 +469,7 @@ async function setWork($: Engine, patch: Partial<WorkView>): Promise<void> {
   await update($, work, (w) => ({ ...w, ...patch }) as WorkView)
 }
 
-/** Fetch the current workspace's counts and next item. Overlapping calls fold into one more fetch. */
+/** Fetch the seat workspace's counts and next item. Overlapping calls fold into one more fetch. */
 async function refreshWork($: Engine, keepNote = false): Promise<void> {
   if (workRun.inflight) {
     workRun.dirty = true
@@ -408,13 +479,13 @@ async function refreshWork($: Engine, keepNote = false): Promise<void> {
   try {
     do {
       workRun.dirty = false
-      const wsId = (await read($, chat)).workspace?.id ?? null
+      const wsId = (await read($, seat)).seat?.workspaceId ?? null
       if (!wsId) {
         await update($, work, () => EMPTY_WORK)
         continue
       }
       const out = await fetchWorkSummary($, wsId)
-      if ((await read($, chat)).workspace?.id !== wsId) {
+      if ((await read($, seat)).seat?.workspaceId !== wsId) {
         workRun.dirty = true // moved while this was out
         continue
       }
@@ -440,8 +511,11 @@ async function refreshWork($: Engine, keepNote = false): Promise<void> {
 /** Claim the top ready item as the person. Says the server's reason on a refusal. */
 async function claimNext($: Engine): Promise<string> {
   if ((await read($, work)).claiming) return ''
-  const wsId = (await read($, chat)).workspace?.id
-  if (!wsId) return 'No workspace yet.'
+  const wsId = (await read($, seat)).seat?.workspaceId
+  if (!wsId) {
+    await setSeat($, { note: 'Join a workspace first.' })
+    return 'Join a workspace first.'
+  }
   await setWork($, { claiming: true, note: '' })
   let note: string
   try {
@@ -475,9 +549,9 @@ function workKind(ev: Record<string, unknown>, status: string): 'new' | 'claimed
   return null
 }
 
-/** Toasts for what changed (at most three at once), and a fresh summary when it touched the current workspace. */
+/** Toasts for what changed (at most three at once), and a fresh summary when it touched the seat workspace. */
 async function onWorkEvents($: Engine, events: Array<Record<string, unknown>>, me: string | null): Promise<void> {
-  const cur = (await read($, chat)).workspace?.id
+  const cur = (await read($, seat)).seat?.workspaceId
   const toasts: string[] = []
   let touched = false
   for (const ev of events) {
@@ -503,18 +577,21 @@ function workText(w: WorkView): string {
 
 // ── narrow windows ──
 
+const NOT_JOINED = 'To code in it, open its folder and Join.'
+
 /** Recent lines as transcript notices: drawn for the person, not sent to the model. */
 async function logRecent($: Engine, count = 10): Promise<void> {
   const v = await read($, chat)
-  if (v.status === 'no-workspace') {
-    $.ui.log('HiveOp chat · no workspace yet')
+  if (!v.workspace) {
+    $.ui.log('HiveOp chat · no chat open')
     return
   }
   if (v.status === 'offline' && v.messages.length === 0) {
     $.ui.log("HiveOp chat · couldn't reach HiveOp")
     return
   }
-  $.ui.log(`HiveOp chat · #${v.workspace?.name ?? ''}`)
+  $.ui.log(`HiveOp chat · #${v.workspace.name}`)
+  if ((await read($, seat)).seat?.workspaceId !== v.workspace.id) $.ui.log(NOT_JOINED)
   const rows = v.messages.slice(-count)
   if (rows.length === 0) $.ui.log('No messages yet.')
   for (const m of rows) $.ui.log(`${m.name} · ${timeOf(m.at)} · ${m.text.replace(/\s+/g, ' ').slice(0, 400)}`)
@@ -552,29 +629,7 @@ async function loadMine($: Engine): Promise<void> {
     await setNav($, { note: refusal(out.fail) })
     return
   }
-  const c = await read($, chat)
-  const stored = (await $.store.get(STORE_WS)) as { id?: unknown } | undefined
-  const pick = [c.workspace?.id, typeof stored?.id === 'string' ? stored.id : undefined].find((id) => id && out.rows.some((w) => w.id === id))
-  await setNav($, { mine: out.rows, current: pick ?? out.rows[0]?.id ?? null })
-}
-
-/** Make this the workspace the chat and the band follow. The sync loop is global and carries on. */
-async function chooseWorkspace($: Engine, ws: WsRow): Promise<void> {
-  const ref = { id: ws.id, name: ws.name }
-  await $.store.set(STORE_WS, ref)
-  await setNav($, { current: ws.id, note: `Now in ${ws.name}.` })
-  const before = await read($, chat)
-  if (before.workspace?.id === ws.id) return
-  await update($, chat, (c) => ({ ...c, workspace: ref, status: 'loading', messages: [], unread: 0, firstNewId: null, draft: '', send: { phase: 'idle' } }) as ChatView)
-  await update($, work, () => EMPTY_WORK)
-  void refreshWork($)
-  const h = await loadHistory($, ws.id, before.me)
-  if ((await read($, chat)).workspace?.id !== ws.id) return // chosen again while this was out
-  if ('r' in h) {
-    await update($, chat, (c) => ({ ...c, status: 'offline' }) as ChatView)
-    return
-  }
-  await update($, chat, (c) => ({ ...c, status: 'ready', messages: merge([], h.msgs) }) as ChatView)
+  await setNav($, { mine: out.rows })
 }
 
 async function loadInvites($: Engine): Promise<void> {
@@ -727,10 +782,11 @@ async function narrowWorkspaces($: Engine): Promise<void> {
         continue
       }
       const rows = n.mine
-      const got = await pickFrom($, 'Use which workspace?', rows.map((w) => (w.id === n.current ? `${w.name} · current` : w.name)))
+      const got = await pickFrom($, 'Open chat in which?', rows.map((w) => w.name))
       if (got && 'item' in got) {
-        await chooseWorkspace($, rows[got.item]!)
-        await say($)
+        await openRoom($, rows[got.item]!)
+        await ensureLoaded($)
+        await logRecent($)
         return
       }
     } else if (tab === 'Invites') {
@@ -883,6 +939,7 @@ async function joinSeat($: Engine, ws: { id: string; name: string }): Promise<vo
       seat: { workspaceId: ws.id, workspaceName: ws.name, agentId: out.seat.agentId, name: out.seat.name, claimed: null },
     })
     $.ui.toast(`HiveOp · joined ${oneLine(ws.name, 40)} as ${oneLine(out.seat.name, 30)}`)
+    await refreshWork($)
   } catch {
     await setSeat($, { busy: false, note: "Couldn't reach HiveOp." })
   }
@@ -893,6 +950,7 @@ async function leaveSeat($: Engine): Promise<void> {
   const v = await read($, seat)
   if (!v.seat) return
   await setSeat($, { seat: null, note: '' })
+  await update($, work, () => EMPTY_WORK)
   try {
     await leaveSession($, v.seat.workspaceId, v.seat.agentId)
   } catch {
@@ -972,6 +1030,7 @@ async function finishSignedIn($: Engine, mem: Mem) {
   }
   await update($, auth, () => ({ phase: 'signed-in', name: me.state === 'ok' ? me.name : null }) as AuthView)
   await update($, chat, (c) => ({ ...c, me: me.state === 'ok' ? me.wallet : c.me }))
+  await restoreTabs($)
   startChat($, mem.chat)
   await detectFolder($)
 }
@@ -1139,6 +1198,10 @@ export const register: Register = (on) => {
     if (wantsChat) {
       await ensureLoaded($)
       if (opened.isPlaced) {
+        if (!(await read($, chat)).workspace) {
+          await goTo($, 'workspaces')
+          return { text: 'Pick a workspace.' }
+        }
         await openChat($)
         return { text: 'Opened chat.' }
       }
@@ -1168,10 +1231,11 @@ export const register: Register = (on) => {
             : v.phase === 'signed-in' && st.target
               ? ` · ${oneLine(st.target.name, 30)} ·`
               : bandText(v)}
+          {v.phase === 'signed-in' && !st.seat && st.folder === 'none' && ' · Not a workspace folder'}
           {v.phase === 'signed-in' && st.note !== '' && ` · ${oneLine(st.note, 70)}`}
-          {v.phase === 'signed-in' && c.unread > 0 && <Text bold color={BRAND}>{` · ${c.unread} new`}</Text>}
-          {v.phase === 'signed-in' && workText(wk)}
-          {v.phase === 'signed-in' && wk.note !== '' && ` · ${oneLine(wk.note, 70)}`}
+          {v.phase === 'signed-in' && unreadTotal(c) > 0 && <Text bold color={BRAND}>{` · ${unreadTotal(c)} new`}</Text>}
+          {v.phase === 'signed-in' && st.seat && workText(wk)}
+          {v.phase === 'signed-in' && st.seat && wk.note !== '' && ` · ${oneLine(wk.note, 70)}`}
         </Text>
         {(v.phase === 'signed-out' || v.phase === 'ended') && (
           <Button key="band-sign-in" label=" Sign in" onPress={() => void signIn($, mem)} />
@@ -1184,7 +1248,7 @@ export const register: Register = (on) => {
         )}
         {v.phase === 'signed-in' && st.seat && <Button key="band-leave" label=" Leave" onPress={() => void leaveSeat($)} />}
         {v.phase === 'signed-in' && <Button key="band-chat" label=" Chat" onPress={() => void showChat($)} />}
-        {v.phase === 'signed-in' && wk.loaded && wk.ready > 0 && (
+        {v.phase === 'signed-in' && st.seat && wk.loaded && wk.ready > 0 && (
           <Button key="band-claim" label={wk.claiming ? ' Claiming…' : ' Claim'} onPress={() => void claimNext($)} />
         )}
         <Button key="band-hide" label=" Hide" onPress={() => void setBand($, 'hidden')} />
@@ -1224,9 +1288,8 @@ export const register: Register = (on) => {
           {nv.tab === 'mine' &&
             (nv.mine ?? []).slice(0, room).map((w) => (
               <Box>
-                <Text bold={w.id === nv.current} color={w.id === nv.current ? BRAND : undefined}>{`${w.id === nv.current ? '● ' : '  '}${w.name}`}</Text>
-                {w.id !== nv.current && <Button key={`ws-use-${w.id}`} label=" Use" onPress={() => void chooseWorkspace($, w)} />}
-                {w.id === nv.current && <Text>{' · current'}</Text>}
+                <Text>{`${w.name} `}</Text>
+                <Button key={`ws-chat-${w.id}`} label="Open chat" variant={c.tabs.some((t) => t.id === w.id) ? undefined : 'primary'} onPress={() => void openRoom($, w)} />
               </Box>
             ))}
           {nv.tab === 'invites' && nv.invites === null && <Text>Loading…</Text>}
@@ -1318,11 +1381,20 @@ export const register: Register = (on) => {
       return (
         <Box flexDirection="column">
           <Box>
-            <Text bold color={BRAND}>{`#${c.workspace?.name ?? 'chat'}`}</Text>
+            {c.tabs.map((t) => (
+              <Button
+                key={`chat-tab-${t.id}`}
+                label={`#${oneLine(t.name, 20)}${t.id !== c.workspace?.id && t.unread > 0 ? ` ${t.unread}` : ''}`}
+                variant={t.id === c.workspace?.id ? 'primary' : undefined}
+                onPress={() => void openRoom($, t)}
+              />
+            ))}
+            {c.workspace && <Button key={`chat-close-${c.workspace.id}`} label=" ×" onPress={() => void closeRoom($, c.workspace!.id)} />}
             <Button key="chat-back" label=" Back" onPress={() => void closeChat($)} />
           </Box>
+          {c.workspace && st.seat?.workspaceId !== c.workspace.id && <Text>{NOT_JOINED}</Text>}
           {c.status === 'offline' && c.messages.length === 0 && <Text color="yellow">Offline. Retrying.</Text>}
-          {c.status === 'no-workspace' && <Text>No workspace yet. Create one at app.hiveop.io.</Text>}
+          {!c.workspace && <Text>No chat open.</Text>}
           {c.status === 'loading' && c.messages.length === 0 && <Text>Loading…</Text>}
           {c.status === 'ready' && c.messages.length === 0 && <Text>No messages yet.</Text>}
           {shown.map((m) => (
@@ -1377,16 +1449,16 @@ export const register: Register = (on) => {
         {v.phase === 'signed-in' && (
           <Box flexDirection="column">
             <Box>
-              <Button key="open-chat" label={c.unread > 0 ? `Chat · ${c.unread} new` : 'Chat'} variant="primary" onPress={() => void showChat($)} />
+              <Button key="open-chat" label={unreadTotal(c) > 0 ? `Chat · ${unreadTotal(c)} new` : 'Chat'} variant="primary" onPress={() => void showChat($)} />
               <Button key="home-work" label={st.busy ? 'Joining…' : 'Work here'} onPress={() => void workHere($)} />
               <Button key="home-claim" label={wk.claiming ? 'Claiming…' : 'Claim next'} onPress={() => void claimNext($)} />
             </Box>
-            {wk.loaded && (
+            {st.seat && wk.loaded && (
               <Text wrap="truncate-end">
                 {`${wk.ready} ready · ${wk.inProgress} in progress${wk.next ? ` · next: ${oneLine(wk.next.title, 60)}` : ''}`}
               </Text>
             )}
-            {wk.note !== '' && <Text color={BRAND}>{oneLine(wk.note, 100)}</Text>}
+            {st.seat && wk.note !== '' && <Text color={BRAND}>{oneLine(wk.note, 100)}</Text>}
             {st.seat && (
               <Box>
                 <Text wrap="truncate-end">{`In ${oneLine(st.seat.workspaceName, 40)} as ${oneLine(st.seat.name, 30)} `}</Text>
@@ -1419,7 +1491,7 @@ function sayText(out: SendOutcome, c: ChatView): string {
   if (out === 'sent') return 'Sent.'
   if (out === 'empty') return 'Usage: /say <message>'
   if (out === 'signed-out') return 'Sign in first: /hiveop sign-in'
-  if (out === 'no-room') return 'No workspace yet.'
+  if (out === 'no-room') return 'No chat open.'
   if (out === 'limited') return `Slow down — try again in ${c.send.phase === 'limited' ? c.send.seconds : 30}s.`
   return 'Not sent. Try again.'
 }
@@ -1428,6 +1500,11 @@ function sayText(out: SendOutcome, c: ChatView): string {
 async function showChat($: Engine) {
   const opened = await $.ui.open({ id: PANE, title: 'HiveOp' })
   await ensureLoaded($)
+  if (opened.isPlaced && !(await read($, chat)).workspace) {
+    await goTo($, 'workspaces')
+    await setNav($, { note: 'Open a chat from a workspace.' })
+    return
+  }
   await setNav($, { screen: 'home' })
   if (opened.isPlaced) await openChat($)
   else await logRecent($)

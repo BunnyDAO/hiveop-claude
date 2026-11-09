@@ -45,9 +45,11 @@ function world(on: any, start: Partial<World> = {}): World {
   mock.env(on, { HOME, HIVEOP_API_URL: API })
   on('command.register', (_: unknown, e: any) => ({ value: { command: e.name ?? 'hiveop' } }))
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('process.run', (_: unknown, e: any) => ({ value: { exitCode: 0, stdout: (e.argv ?? []).includes('get-url') ? 'git@github.com:acme/forge.git\n' : '', stderr: '' } }))
   on('fs.read', () => ({ value: JSON.stringify({ key: KEY }) }))
-  const store = new Map<string, unknown>()
+  // Joined automatically in this folder: the band follows the seat, not a chosen room.
+  const store = new Map<string, unknown>([['join.auto', true]])
   on('store.get', (_: unknown, e: any) => ({ value: store.get(e.key) }))
   on('store.set', (_: unknown, e: any) => {
     store.set(e.key, e.value)
@@ -56,6 +58,7 @@ function world(on: any, start: Partial<World> = {}): World {
   on('ui.open', () => ({ value: w.placed ? { isPlaced: true } : { isPlaced: false, reason: 'narrow' } }))
   on('ui.panes', () => ({ value: w.placed ? [{ id: 'hiveop', title: 'HiveOp', isShown: true, isFocused: false, isPlaced: true }] : [] }))
   on('ui.toast', (_: unknown, e: any) => {
+    if (e.text.startsWith('HiveOp · joined ')) return { value: undefined } // the seat's own toast
     w.toasts.push(e.text)
     return { value: undefined }
   })
@@ -75,7 +78,8 @@ function world(on: any, start: Partial<World> = {}): World {
     w.calls.push({ path, method })
     const reply = (status: number, body: unknown = {}) => ({ value: { status, ok: status < 300, headers: {}, text: JSON.stringify(body) } })
     if (path.startsWith('/me/hive/profile')) return reply(200, { profile: { displayName: 'Ada', walletPubkey: ME } })
-    if (path === '/workspaces') return reply(200, { workspaces: [{ id: WS, name: 'Forge' }] })
+    if (path.startsWith('/me/workspaces/match')) return reply(200, { success: true, mine: [{ id: WS, name: 'Forge' }], joinable: [] })
+    if (path === `/workspaces/${WS}/adopted-sessions` && method === 'POST') return reply(200, { success: true, agentId: 'ag-1', name: 'Claude Code', color: '#d97757', resumed: false })
     if (path.startsWith('/me/sync')) {
       if (!path.includes('cursor=')) return reply(200, { cursor: 'c0', events: [], timedOut: false })
       const events = w.pending

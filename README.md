@@ -14,7 +14,7 @@ The band above the prompt has a Hide button; home has Show band.
 Set `HIVEOP_API_URL` to point at another HiveOp API (default
 `https://api.wenrwa.com/api/v1`).
 
-The band shows the current workspace's work: `3 ready · 1 in progress · next: <title>`
+The band shows your seat's work: `3 ready · 1 in progress · next: <title>`
 with a Claim button. Home has Claim next (it takes the top ready item as you, and
 says the server's reason if you already hold one). Toasts tell you when work is
 new, claimed or done.
