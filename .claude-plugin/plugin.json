@@ -1,0 +1,6 @@
+{
+  "name": "hiveop",
+  "version": "0.1.0",
+  "description": "HiveOp for Claude Code: sign in, and your HiveOp account follows you into the terminal.",
+  "types": "./types/index.d.ts"
+}
