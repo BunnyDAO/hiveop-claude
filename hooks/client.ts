@@ -230,6 +230,7 @@ function wsRow(raw: unknown): WsRow | null {
     kind: s(w.kind),
     members: typeof w.memberCount === 'number' ? w.memberCount : null,
     canJoin: caps.canJoin === true,
+    repoUrl: s(w.githubRepoUrl).trim(),
   }
 }
 

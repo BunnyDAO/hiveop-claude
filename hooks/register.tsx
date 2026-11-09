@@ -32,6 +32,7 @@ import {
   setFollow,
   startPairing,
 } from './client'
+import { inlinePluginDir, normRemote, openFolder, rememberClone, scanClones, takeJoinOnOpen, writeJoinOnOpen } from './launch'
 
 const EMPTY_CHAT: ChatView = {
   workspace: null,
@@ -58,8 +59,9 @@ const EMPTY_NAV: NavView = {
   invites: null,
   explore: { search: '', rows: [], offset: 0, total: 0, loaded: false },
   people: { query: '', rows: [], following: [], offset: 0, more: false, loaded: false },
+  clones: {},
 }
-const nav = atom({ plugin: 'hiveop', key: 'nav' } as const, EMPTY_NAV, { shape: 'nav-2' })
+const nav = atom({ plugin: 'hiveop', key: 'nav' } as const, EMPTY_NAV, { shape: 'nav-3' })
 const EMPTY_WORK: WorkView = { workspaceId: null, loaded: false, ready: 0, inProgress: 0, next: null, note: '', claiming: false }
 const work = atom({ plugin: 'hiveop', key: 'work' } as const, EMPTY_WORK, { shape: 'work-1' })
 const EMPTY_SEAT: SeatView = { folder: 'unchecked', target: null, auto: false, seat: null, busy: false, note: '' }
@@ -684,6 +686,20 @@ async function loadMine($: Engine): Promise<void> {
     return
   }
   await setNav($, { mine: out.rows })
+  try {
+    const home = (await $.env.get('HOME')) ?? ''
+    await setNav($, { clones: await scanClones($, sm.cwd, home) })
+  } catch {
+    // No clones known: rows simply offer no Open.
+  }
+}
+
+/** Open the workspace's clone in a new terminal tab; on any trouble, show the command to copy. */
+async function openRow($: Engine, row: WsRow, dir: string, canLaunch: boolean): Promise<void> {
+  const home = (await $.env.get('HOME')) ?? ''
+  await writeJoinOnOpen($, folderKey(dir), row.id)
+  const out = await openFolder($, dir, inlinePluginDir($.plugin.root, home), canLaunch)
+  await setNav($, { note: out.ok ? `Opened ${oneLine(row.name, 40)}.` : out.command })
 }
 
 async function loadInvites($: Engine): Promise<void> {
@@ -955,8 +971,10 @@ async function detectFolder($: Engine): Promise<void> {
     if ((await read($, seat)).seat) return
     const remote = await gitRemote($, sm.cwd)
     const m = remote ? await matchWorkspaces($, remote) : null
-    const mine = m?.mine[0]
+    const opened = await takeJoinOnOpen($, sm.folderKey)
+    const mine = (opened ? m?.mine.find((x) => x.id === opened) : undefined) ?? m?.mine[0]
     const other = m?.joinable[0]
+    if (remote && (mine || other)) await rememberClone($, remote, sm.cwd)
     if (mine) await setSeat($, { folder: 'mine', target: mine })
     else if (other) await setSeat($, { folder: 'joinable', target: other })
     else {
@@ -964,7 +982,7 @@ async function detectFolder($: Engine): Promise<void> {
       return
     }
     const v = await read($, seat)
-    if (mine && v.auto) await joinSeat($, mine)
+    if (mine && (v.auto || (opened && mine.id === opened))) await joinSeat($, mine)
   } catch {
     // The folder stays unchecked; the band simply offers nothing.
   }
@@ -1349,6 +1367,15 @@ export const register: Register = (on) => {
             (nv.mine ?? []).slice(0, room).map((w) => (
               <Box>
                 <Text>{`${w.name} `}</Text>
+                {(() => {
+                  const dir = nv.clones[normRemote(w.repoUrl)]
+                  if (st.seat?.workspaceId === w.id) return <Text>{'Joined '}</Text>
+                  if (st.folder === 'mine' && st.target?.id === w.id)
+                    return <Button key={`ws-code-${w.id}`} label="Code here" variant="primary" onPress={() => void joinSeat($, w)} />
+                  if (dir) return <Button key={`ws-open-${w.id}`} label="Open" onPress={() => void openRow($, w, dir, e.surface === 'terminal')} />
+                  return null
+                })()}
+                <Text>{' your Claude plan '}</Text>
                 <Button key={`ws-chat-${w.id}`} label="Open chat" variant={c.tabs.some((t) => t.id === w.id) ? undefined : 'primary'} onPress={() => void openRoom($, w)} />
               </Box>
             ))}

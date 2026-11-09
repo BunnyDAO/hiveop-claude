@@ -42,7 +42,7 @@ export type ChatView = {
 }
 
 /** One workspace as a list row. */
-export type WsRow = { id: string; name: string; kind: string; members: number | null; canJoin: boolean }
+export type WsRow = { id: string; name: string; kind: string; members: number | null; canJoin: boolean; repoUrl: string }
 /** A pending invite to the signed-in person. The token only ever goes back to the server. */
 export type InviteRow = { id: string; token: string; wsId: string; wsName: string }
 export type PilotRow = { wallet: string; name: string }
@@ -59,6 +59,8 @@ export type NavView = {
   invites: InviteRow[] | null
   explore: { search: string; rows: WsRow[]; offset: number; total: number; loaded: boolean }
   people: { query: string; rows: PilotRow[]; following: string[]; offset: number; more: boolean; loaded: boolean }
+  // Clones on this computer (hcp-22): normalised git remote → folder. Pane only.
+  clones: Record<string, string>
 }
 
 /** The work band: the seat workspace's ready queue. Titles are other people's words: band, pane and toasts only. */
