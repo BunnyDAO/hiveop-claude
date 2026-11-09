@@ -403,6 +403,25 @@ export async function pollApproval($: Engine, id: string): Promise<{ state: Appr
   return { state: 'unreachable' }
 }
 
+// ── repo access for HiveOp cloud repos (hcp-26) ──
+
+/** Whether this key holds an approved repo grant. `revoked`: the key or grant is gone. Never carries a credential. */
+export async function repoAccess($: Engine): Promise<'granted' | 'none' | 'revoked' | 'unreachable'> {
+  const r = await hiveop($, '/me/repo-access')
+  if (!r || r.status === 0) return 'unreachable'
+  if (r.status === 401 || r.status === 403) return 'revoked'
+  if (!r.ok) return 'unreachable'
+  return r.body?.granted === true ? 'granted' : 'none'
+}
+
+/** File a repo-access request. Nothing is granted until the browser approves. */
+export async function fileRepoAccess($: Engine): Promise<{ id: string; expiresAt: string } | { fail: Fetched | null }> {
+  const r = await hiveop($, '/me/plugin-approvals', { method: 'POST', body: { kind: 'repo_access' } })
+  const a = r?.body?.approval as { id?: unknown; expiresAt?: unknown } | undefined
+  if (!r || !r.ok || !a || !s(a.id)) return { fail: r }
+  return { id: s(a.id), expiresAt: s(a.expiresAt) }
+}
+
 /** The person's own cloud agents in one workspace; null when it could not be read. */
 export async function listCloudAgents($: Engine, wsId: string): Promise<CloudAgent[] | null> {
   const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/cloud-agents`)

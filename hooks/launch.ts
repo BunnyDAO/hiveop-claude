@@ -221,6 +221,8 @@ export function lastPercent(text: string): number | null {
 
 /** One line for a failed clone, from git's stderr. The output itself is never shown: it can carry credentialed URLs. */
 export function cloneFailureLine(stderr: string): string {
+  // The credential helper's own fixed words (hcp-26); nothing else of git's output is read for meaning beyond this.
+  if (/hiveop-git-credential: revoked/.test(stderr)) return 'Repo access revoked.'
   return /authentication failed|could not read (?:username|password)|permission denied|repository not found|not found|access denied|terminal prompts disabled|\b40[134]\b|publickey/i.test(stderr)
     ? 'No GitHub access to this repo.'
     : 'Clone failed.'
@@ -246,12 +248,50 @@ export async function chooseCloneFolder($: Engine, home: string, name: string, r
 
 export type Cloned = { ok: true } | { ok: false; reason: string }
 
-/** git clone --progress into `dir`; `onPercent` hears each step. Failure comes back as one safe line. */
-export async function cloneRepo($: Engine, repoUrl: string, dir: string, onPercent: (n: number) => void): Promise<Cloned> {
+/** "https://host[:port]" of an https remote: the scope git matches `credential.<origin>.helper` against. '' when not https. */
+export function httpsOrigin(url: string): string {
+  const m = /^https:\/\/([^/@:\s]+(?::\d+)?)(?:\/|$)/i.exec(url.trim())
+  return m ? `https://${m[1]!.toLowerCase()}` : ''
+}
+
+/**
+ * The git credential helper for a HiveOp cloud repo: a script shipped in this plugin that asks the HiveOp API
+ * for a fresh token each time. Only the script path, the API address and the workspace id are named here;
+ * it reads the key itself. Run through `sh`, so the file needs no executable bit. '' when anything is unsafe.
+ */
+export function helperValue(pluginRoot: string, api: string, wsId: string): string {
+  if (!pluginRoot || hasControl(pluginRoot) || !/^https?:\/\/[A-Za-z0-9:/._-]+$/.test(api) || !/^[A-Za-z0-9-]+$/.test(wsId)) return ''
+  return `!sh ${shq(`${pluginRoot.replace(/\/+$/, '')}/bin/hiveop-git-credential`)} ${shq(api)} ${shq(wsId)}`
+}
+
+/** `-c` pairs that reset any other helper for this origin (so no stored login is used or written), then name ours. */
+export function helperFlags(origin: string, helper: string): string[] {
+  return ['-c', `credential.${origin}.helper=`, '-c', `credential.${origin}.helper=${helper}`]
+}
+
+/** Pin the helper into the clone's own config, so pull and push use it the same way. Nothing secret is written. */
+export async function pinHelper($: Engine, dir: string, origin: string, helper: string): Promise<boolean> {
+  try {
+    const key = `credential.${origin}.helper`
+    const a = await $.process.run(['git', '-C', dir, 'config', '--local', '--add', key, ''], { timeoutMs: 5000 })
+    const b = await $.process.run(['git', '-C', dir, 'config', '--local', '--add', key, helper], { timeoutMs: 5000 })
+    return a.exitCode === 0 && b.exitCode === 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * git clone --progress into `dir`; `onPercent` hears each step. Failure comes back as one safe line.
+ * With a `helper` (HiveOp cloud repos) git gets its credential from that helper: the address stays plain.
+ */
+export async function cloneRepo($: Engine, repoUrl: string, dir: string, onPercent: (n: number) => void, helper?: { origin: string; value: string }): Promise<Cloned> {
   if (!cloneableUrl(repoUrl) || hasControl(dir)) return { ok: false, reason: 'Clone failed.' }
+  if (helper && (!helper.origin || !helper.value || httpsOrigin(repoUrl) !== helper.origin)) return { ok: false, reason: 'Clone failed.' }
   let tail = ''
   try {
-    const run = $.process.spawn({ argv: ['git', 'clone', '--progress', '--', repoUrl.trim(), dir], env: { GIT_TERMINAL_PROMPT: '0' } })
+    const pre = helper ? helperFlags(helper.origin, helper.value) : []
+    const run = $.process.spawn({ argv: ['git', ...pre, 'clone', '--progress', '--', repoUrl.trim(), dir], env: { GIT_TERMINAL_PROMPT: '0' } })
     let code: number | null = null
     while (true) {
       const step = await run.next()

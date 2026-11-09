@@ -6,6 +6,7 @@ import {
   type Fetched,
   acceptInvite,
   approvalUrl,
+  apiBase,
   adoptSession,
   claimIssue,
   computerName,
@@ -13,6 +14,7 @@ import {
   fetchWorkSummary,
   fileCloudRun,
   fetchMe,
+  fileRepoAccess,
   folderKey,
   fetchAvatar,
   followingAmong,
@@ -31,6 +33,7 @@ import {
   openInBrowser,
   pollApproval,
   pollPairing,
+  repoAccess,
   refusal,
   requestToJoin,
   saveKey,
@@ -40,7 +43,7 @@ import {
   workspaceUrl,
 } from './client'
 import { LOGO_PNG } from './logo'
-import { chooseCloneFolder, cloneRepo, cloneableUrl, inlinePluginDir, normRemote, openFolder, rememberClone, scanClones, takeJoinOnOpen, writeJoinOnOpen } from './launch'
+import { chooseCloneFolder, cloneRepo, cloneableUrl, helperValue, httpsOrigin, inlinePluginDir, pinHelper, normRemote, openFolder, rememberClone, scanClones, takeJoinOnOpen, writeJoinOnOpen } from './launch'
 
 const EMPTY_CHAT: ChatView = {
   workspace: null,
@@ -715,8 +718,30 @@ async function openRow($: Engine, row: WsRow, dir: string, canLaunch: boolean): 
 
 const cloning = new Set<string>()
 
-/** Get code: clone the repo with the person's own git access, remember the folder, then Open. */
+/** Get code. GitHub: clone with the person's own git access. HiveOp cloud: ask once (browser), then clone through the helper. */
 async function getCode($: Engine, row: WsRow, canLaunch: boolean): Promise<void> {
+  if (row.kind !== 'cloud') return cloneAndOpen($, row, canLaunch)
+  if (cloning.has(row.id) || cloudMem.poll) return
+  const access = await repoAccess($)
+  if (access === 'revoked') {
+    await setNav($, { note: 'Repo access revoked.' })
+    return
+  }
+  if (access === 'unreachable') {
+    await setNav($, { note: "Couldn't reach HiveOp." })
+    return
+  }
+  if (access === 'granted') return cloneAndOpen($, row, canLaunch)
+  const out = await fileRepoAccess($)
+  if ('fail' in out) {
+    await setCloudNote($, row.id, refusal(out.fail))
+    return
+  }
+  await waitForApproval($, row.id, out, () => cloneAndOpen($, row, canLaunch))
+}
+
+/** Clone into ~/HiveOp/<slug>, remember the folder, then Open. Cloud repos use the credential helper. */
+async function cloneAndOpen($: Engine, row: WsRow, canLaunch: boolean): Promise<void> {
   if (cloning.has(row.id)) return
   cloning.add(row.id)
   const name = oneLine(row.name, 40)
@@ -726,13 +751,30 @@ async function getCode($: Engine, row: WsRow, canLaunch: boolean): Promise<void>
     if (!target.existing) {
       await setNav($, { note: `Cloning ${name}…` })
       let last = -1
-      const out = await cloneRepo($, row.repoUrl, target.dir, (p) => {
-        if (p === last) return
-        last = p
-        void setNav($, { note: `Cloning ${name}… ${p}%` })
-      })
+      const origin = row.kind === 'cloud' ? httpsOrigin(row.repoUrl) : ''
+      const helper = row.kind === 'cloud' ? helperValue($.plugin.root, await apiBase($), row.id) : ''
+      if (row.kind === 'cloud' && (!origin || !helper)) {
+        await setNav($, { note: 'Clone failed.' })
+        return
+      }
+      const out = await cloneRepo(
+        $,
+        row.repoUrl,
+        target.dir,
+        (p) => {
+          if (p === last) return
+          last = p
+          void setNav($, { note: `Cloning ${name}… ${p}%` })
+        },
+        row.kind === 'cloud' ? { origin, value: helper } : undefined,
+      )
       if (!out.ok) {
         await setNav($, { note: out.reason })
+        return
+      }
+      // Push and pull use the same helper, from the clone's own config.
+      if (row.kind === 'cloud' && !(await pinHelper($, target.dir, origin, helper))) {
+        await setNav($, { note: 'Clone failed.' })
         return
       }
     }
@@ -1123,7 +1165,8 @@ const CLOUD_POLL_MS = 2000
 const CLOUD_SLOW_MS = 30_000
 const CLOUD_MAX_FAILURES = 5
 const CLOUD_LOOK = 8
-const cloudMem: { poll: Cancel | null; slow: Cancel | null; failures: number } = { poll: null, slow: null, failures: 0 }
+// `after`: what to do once the open request is approved (Get code continues into the clone).
+const cloudMem: { poll: Cancel | null; slow: Cancel | null; failures: number; after: (() => Promise<void>) | null } = { poll: null, slow: null, failures: 0, after: null }
 
 async function setCloudNote($: Engine, wsId: string, text: string): Promise<void> {
   await update($, cloud, (c) => ({ ...c, request: null, note: { wsId, text } }) as CloudView)
@@ -1168,6 +1211,7 @@ async function cloudTick($: Engine, wsId: string, approvalId: string, deadline: 
   if (!cloudMem.poll) return
   if ((await $.clock.now()) >= deadline) {
     stopCloudPoll()
+    cloudMem.after = null
     await setCloudNote($, wsId, 'Request expired.')
     return
   }
@@ -1181,17 +1225,37 @@ async function cloudTick($: Engine, wsId: string, approvalId: string, deadline: 
     cloudMem.failures += 1
     if (cloudMem.failures >= CLOUD_MAX_FAILURES) {
       stopCloudPoll()
+      cloudMem.after = null
       await setCloudNote($, wsId, "Couldn't reach HiveOp.")
     }
     return
   }
   stopCloudPoll()
+  const after = cloudMem.after
+  cloudMem.after = null
   if (r.state === 'approved') {
     await update($, cloud, (c) => ({ ...c, request: null, note: null }) as CloudView)
+    if (after) {
+      await after()
+      return
+    }
     await refreshCloud($, [wsId])
     return
   }
   await setCloudNote($, wsId, r.state === 'denied' ? 'Not approved.' : 'Request expired.')
+}
+
+/** Show the approval link, open it, and poll until answered or expired. `after` runs once approved. */
+async function waitForApproval($: Engine, wsId: string, out: { id: string; expiresAt: string }, after: (() => Promise<void>) | null): Promise<void> {
+  const url = approvalUrl(out.id)
+  await update($, cloud, (c) => ({ ...c, request: { wsId, id: out.id, url }, note: null }) as CloudView)
+  await openInBrowser($, url)
+  const deadline = Date.parse(out.expiresAt) || (await $.clock.now()) + 10 * 60_000
+  cloudMem.failures = 0
+  cloudMem.after = after
+  cloudMem.poll = $.clock.every(CLOUD_POLL_MS, () => {
+    void cloudTick($, wsId, out.id, deadline)
+  })
 }
 
 /** Run in cloud (no agentId) or Wake (agentId): file the request, open the approval page, wait. */
@@ -1202,14 +1266,7 @@ async function runInCloud($: Engine, wsId: string, agentId?: string): Promise<vo
     await setCloudNote($, wsId, refusal(out.fail))
     return
   }
-  const url = approvalUrl(out.id)
-  await update($, cloud, (c) => ({ ...c, request: { wsId, id: out.id, url }, note: null }) as CloudView)
-  await openInBrowser($, url)
-  const deadline = Date.parse(out.expiresAt) || (await $.clock.now()) + 10 * 60_000
-  cloudMem.failures = 0
-  cloudMem.poll = $.clock.every(CLOUD_POLL_MS, () => {
-    void cloudTick($, wsId, out.id, deadline)
-  })
+  await waitForApproval($, wsId, out, null)
 }
 
 async function sleepCloud($: Engine, wsId: string, agent: CloudAgent): Promise<void> {
@@ -1583,7 +1640,7 @@ export const register: Register = (on) => {
                       if (st.folder === 'mine' && st.target?.id === w.id)
                         return <Button key={`ws-code-${w.id}`} label="Code here" variant="primary" onPress={() => void joinSeat($, w)} />
                       if (dir) return <Button key={`ws-open-${w.id}`} label="Open" variant="primary" onPress={() => void openRow($, w, dir, e.surface === 'terminal')} />
-                      if (w.kind === 'github' && cloneableUrl(w.repoUrl))
+                      if ((w.kind === 'github' && cloneableUrl(w.repoUrl)) || (w.kind === 'cloud' && cloneableUrl(w.repoUrl) && httpsOrigin(w.repoUrl) !== ''))
                         return <Button key={`ws-get-${w.id}`} label="Get code" variant="primary" onPress={() => void getCode($, w, e.surface === 'terminal')} />
                       return null
                     })()}

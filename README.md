@@ -31,3 +31,16 @@ claimed), never chat. If the folder's repo belongs to a workspace you are not in
 the band offers **Request to join**; anywhere else the band stays social (chat,
 people, notifications). Home has **Work here** (join this folder's workspace, or
 pick one of yours) and a **Join automatically in matching folders** switch.
+
+## Get code for HiveOp cloud repos
+
+Workspaces hosted on HiveOp show **Get code** too. The first time, the plugin
+asks for repo access: approve in your browser (the link also shows in the pane).
+It then clones into `~/HiveOp/<name>` through a git credential helper
+(`bin/hiveop-git-credential`). The helper asks HiveOp for a fresh 15-minute
+token on every git command; nothing goes into the remote address or onto disk,
+and push and pull work the same way. The helper reads the plugin key from
+`~/.hiveop/claude-plugin.json` itself and hands it to curl on stdin, so it never
+appears on a command line or in output. Repo access is limited to your own cloud
+workspaces and ends when the key is revoked or you sign out. Helper tests:
+`node --test bin/test/credential-helper.test.mjs`.
