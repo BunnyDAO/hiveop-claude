@@ -1,24 +1,29 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
-import type { AuthView, ChatMsg, ChatView, InviteRow, NavView, PilotRow, WorkView, WsRow } from '../types'
+import type { AuthView, ChatMsg, ChatView, InviteRow, NavView, PilotRow, SeatView, WorkView, WsRow } from '../types'
 import {
   type Fetched,
   acceptInvite,
+  adoptSession,
   claimIssue,
   computerName,
   declineInvite,
   fetchWorkSummary,
   fetchMe,
+  folderKey,
   followingAmong,
   forgetKey,
+  gitRemote,
   hiveop,
   joinWorkspace,
+  leaveSession,
   listExplore,
   listInvites,
   listMine,
   listPilots,
   loadKey,
+  matchWorkspaces,
   pollPairing,
   refusal,
   requestToJoin,
@@ -54,6 +59,8 @@ const EMPTY_NAV: NavView = {
 const nav = atom({ plugin: 'hiveop', key: 'nav' } as const, EMPTY_NAV, { shape: 'nav-1' })
 const EMPTY_WORK: WorkView = { workspaceId: null, loaded: false, ready: 0, inProgress: 0, next: null, note: '', claiming: false }
 const work = atom({ plugin: 'hiveop', key: 'work' } as const, EMPTY_WORK, { shape: 'work-1' })
+const EMPTY_SEAT: SeatView = { folder: 'unchecked', target: null, auto: false, seat: null, busy: false, note: '' }
+const seat = atom({ plugin: 'hiveop', key: 'seat' } as const, EMPTY_SEAT, { shape: 'seat-1' })
 
 // Chat for the person's workspace, and the one sync loop that keeps it live.
 // The server rate-limits at 20/min: ONE request in flight, a floor between
@@ -445,6 +452,7 @@ async function claimNext($: Engine): Promise<string> {
     else {
       const r = await claimIssue($, wsId, fresh.summary.next.id)
       note = r && r.ok ? `Claimed: ${oneLine(fresh.summary.next.title)}` : refusal(r)
+      if (r && r.ok) await noteClaim($, wsId, fresh.summary.next.title)
     }
   } catch {
     note = "Couldn't reach HiveOp."
@@ -453,6 +461,11 @@ async function claimNext($: Engine): Promise<string> {
   await refreshWork($, true)
   $.ui.toast(`HiveOp · ${note}`)
   return note
+}
+
+/** The seat remembers the item its agent holds (title only), so the system prompt can say so. */
+async function noteClaim($: Engine, wsId: string, title: string): Promise<void> {
+  await update($, seat, (v) => (v.seat && v.seat.workspaceId === wsId ? ({ ...v, seat: { ...v.seat, claimed: title } } as SeatView) : v))
 }
 
 function workKind(ev: Record<string, unknown>, status: string): 'new' | 'claimed' | 'done' | null {
@@ -797,6 +810,139 @@ async function narrowPeople($: Engine): Promise<void> {
   }
 }
 
+
+// ── this window's seat (hcp-15, ADR-0019) ──
+// The folder decides the workspace: a folder whose git remote is one of the
+// person's workspaces offers "Join as agent". Joining registers THIS window as
+// an Adopted session; the model is told only the seat (workspace, agent name,
+// claimed item), never chat. Module variables start over on a reload;
+// session.start sets them again.
+
+const STORE_AUTO = 'join.auto'
+const sm = { cwd: '', folderKey: '', sessionKey: '' }
+
+async function setSeat($: Engine, patch: Partial<SeatView>): Promise<void> {
+  await update($, seat, (v) => ({ ...v, ...patch }) as SeatView)
+}
+
+/** One line of a name or title, safe to put in the system prompt. */
+function oneLinePrompt(t: string, max: number): string {
+  const x = t.replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ').replace(/\s+/g, ' ').trim()
+  return x.length > max ? `${x.slice(0, max - 1)}…` : x
+}
+
+/** The seat facts, and only those. */
+function seatText(v: NonNullable<SeatView['seat']>): string {
+  const ws = oneLinePrompt(v.workspaceName, 60)
+  const claimed = v.claimed ? ` Claimed item: ${oneLinePrompt(v.claimed, 80)}.` : ''
+  return `HiveOp seat: this session is the agent "${oneLinePrompt(v.name, 40)}" in the HiveOp workspace "${ws}" (id ${v.workspaceId}).${claimed}`
+}
+
+/** Look at the folder's git remote and ask HiveOp which workspace it belongs to. Joins by itself when the person chose that. */
+async function detectFolder($: Engine): Promise<void> {
+  try {
+    if ((await read($, auth)).phase !== 'signed-in' || !sm.cwd) return
+    if ((await read($, seat)).seat) return
+    const remote = await gitRemote($, sm.cwd)
+    const m = remote ? await matchWorkspaces($, remote) : null
+    const mine = m?.mine[0]
+    const other = m?.joinable[0]
+    if (mine) await setSeat($, { folder: 'mine', target: mine })
+    else if (other) await setSeat($, { folder: 'joinable', target: other })
+    else {
+      await setSeat($, { folder: 'none', target: null })
+      return
+    }
+    const v = await read($, seat)
+    if (mine && v.auto) await joinSeat($, mine)
+  } catch {
+    // The folder stays unchecked; the band simply offers nothing.
+  }
+}
+
+async function joinSeat($: Engine, ws: { id: string; name: string }): Promise<void> {
+  const cur = await read($, seat)
+  if (cur.busy || cur.seat) return
+  await setSeat($, { busy: true, note: '' })
+  try {
+    if (!sm.sessionKey) {
+      try {
+        sm.sessionKey = await $.session.id()
+      } catch {
+        sm.sessionKey = `s${await $.clock.now()}`
+      }
+    }
+    const out = await adoptSession($, ws.id, sm.folderKey, sm.sessionKey)
+    if ('fail' in out) {
+      await setSeat($, { busy: false, note: refusal(out.fail) })
+      return
+    }
+    await setSeat($, {
+      busy: false,
+      note: '',
+      seat: { workspaceId: ws.id, workspaceName: ws.name, agentId: out.seat.agentId, name: out.seat.name, claimed: null },
+    })
+    $.ui.toast(`HiveOp · joined ${oneLine(ws.name, 40)} as ${oneLine(out.seat.name, 30)}`)
+  } catch {
+    await setSeat($, { busy: false, note: "Couldn't reach HiveOp." })
+  }
+}
+
+/** Leave the workspace: the agent goes offline (its history stays). */
+async function leaveSeat($: Engine): Promise<void> {
+  const v = await read($, seat)
+  if (!v.seat) return
+  await setSeat($, { seat: null, note: '' })
+  try {
+    await leaveSession($, v.seat.workspaceId, v.seat.agentId)
+  } catch {
+    // Offline either way once the session ends.
+  }
+}
+
+async function requestSeatAccess($: Engine): Promise<void> {
+  const v = await read($, seat)
+  if (!v.target) return
+  const r = await requestToJoin($, v.target.id)
+  await setSeat($, { note: r && r.ok ? `Asked to join ${oneLine(v.target.name, 40)}.` : refusal(r) })
+}
+
+async function setAuto($: Engine, on: boolean): Promise<void> {
+  await $.store.set(STORE_AUTO, on)
+  await setSeat($, { auto: on })
+  if (on) {
+    const v = await read($, seat)
+    if (v.folder === 'mine' && v.target && !v.seat) await joinSeat($, v.target)
+  }
+}
+
+/** Home's Work here: this folder's workspace, else one of the person's own. */
+async function workHere($: Engine): Promise<string> {
+  let v = await read($, seat)
+  if (v.seat) return `Already in ${oneLine(v.seat.workspaceName, 40)}.`
+  if (v.folder === 'unchecked') {
+    await detectFolder($)
+    v = await read($, seat)
+    if (v.seat) return `Joined ${oneLine(v.seat.workspaceName, 40)}.`
+  }
+  if (v.folder === 'mine' && v.target) {
+    await joinSeat($, v.target)
+  } else if (v.folder === 'joinable' && v.target) {
+    await requestSeatAccess($)
+  } else {
+    const out = await listMine($)
+    if ('fail' in out) return refusal(out.fail)
+    if (out.rows.length === 0) return 'No workspaces yet. Create one at app.hiveop.io.'
+    const pick = await pickFrom($, 'Work in which workspace?', out.rows.map((w) => w.name))
+    if (!pick || !('item' in pick)) return 'Not joined.'
+    const ws = out.rows[pick.item]
+    if (!ws) return 'Not joined.'
+    await joinSeat($, ws)
+  }
+  const after = await read($, seat)
+  return after.seat ? `Joined ${oneLine(after.seat.workspaceName, 40)}.` : after.note || 'Done.'
+}
+
 const POLL_MS = 3000
 const MAX_POLL_FAILURES = 5
 
@@ -830,6 +976,7 @@ async function finishSignedIn($: Engine, mem: Mem) {
   await update($, auth, () => ({ phase: 'signed-in', name: me.state === 'ok' ? me.name : null }) as AuthView)
   await update($, chat, (c) => ({ ...c, me: me.state === 'ok' ? me.wallet : c.me }))
   startChat($, mem.chat)
+  await detectFolder($)
 }
 
 async function tick($: Engine, mem: Mem) {
@@ -887,6 +1034,8 @@ async function signIn($: Engine, mem: Mem): Promise<AuthView> {
 }
 
 async function signOut($: Engine, mem: Mem) {
+  await leaveSeat($)
+  await update($, seat, (v) => ({ ...EMPTY_SEAT, auto: v.auto }) as SeatView)
   stopPolling(mem)
   stopChat(mem.chat)
   await forgetKey($)
@@ -930,7 +1079,29 @@ export const register: Register = (on) => {
     await $.command.register({ name: 'hiveop', description: 'HiveOp: sign in, chat, your account in Claude Code' })
     await $.command.register({ name: 'say', description: 'Say something in your HiveOp workspace chat', argumentHint: '<message>' })
     await restoreNav($)
+    sm.cwd = e.cwd
+    sm.folderKey = folderKey(e.cwd)
+    try {
+      sm.sessionKey = await $.session.id()
+    } catch {
+      sm.sessionKey = ''
+    }
+    const auto = (await $.store.get(STORE_AUTO)) === true
+    await update($, seat, (v) => ({ ...EMPTY_SEAT, auto, seat: v.seat }) as SeatView)
     await restore($, mem)
+    return next(e)
+  })
+
+  // The model is told this window's seat and nothing else from HiveOp.
+  on('prompt.compose', async ($, e, next) => {
+    const r = await next(e)
+    const v = await read($, seat)
+    if (!v.seat) return r
+    return { sections: [...r.sections, { id: 'hiveop:seat', text: seatText(v.seat), scope: 'session' as const }] }
+  })
+
+  on('session.end', async ($, e, next) => {
+    await leaveSeat($)
     return next(e)
   })
 
@@ -988,13 +1159,19 @@ export const register: Register = (on) => {
     const c = await read($, chat)
     const nv = await read($, nav)
     const wk = await read($, work)
+    const st = await read($, seat)
     if (nv.band === 'hidden') return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     return (
       <Box>
         <Text wrap="truncate-end">
           <Text color={BRAND} bold>HiveOp</Text>
-          {bandText(v)}
+          {v.phase === 'signed-in' && st.seat
+            ? ` · ${oneLine(st.seat.workspaceName, 30)} · ${oneLine(st.seat.name, 30)}`
+            : v.phase === 'signed-in' && st.target
+              ? ` · ${oneLine(st.target.name, 30)} ·`
+              : bandText(v)}
+          {v.phase === 'signed-in' && st.note !== '' && ` · ${oneLine(st.note, 70)}`}
           {v.phase === 'signed-in' && c.unread > 0 && <Text bold color={BRAND}>{` · ${c.unread} new`}</Text>}
           {v.phase === 'signed-in' && workText(wk)}
           {v.phase === 'signed-in' && wk.note !== '' && ` · ${oneLine(wk.note, 70)}`}
@@ -1002,6 +1179,13 @@ export const register: Register = (on) => {
         {(v.phase === 'signed-out' || v.phase === 'ended') && (
           <Button key="band-sign-in" label=" Sign in" onPress={() => void signIn($, mem)} />
         )}
+        {v.phase === 'signed-in' && !st.seat && st.folder === 'mine' && st.target && (
+          <Button key="band-join" label={st.busy ? ' Joining…' : ' Join as agent'} variant="primary" onPress={() => void joinSeat($, st.target!)} />
+        )}
+        {v.phase === 'signed-in' && !st.seat && st.folder === 'joinable' && (
+          <Button key="band-request" label=" Request to join" onPress={() => void requestSeatAccess($)} />
+        )}
+        {v.phase === 'signed-in' && st.seat && <Button key="band-leave" label=" Leave" onPress={() => void leaveSeat($)} />}
         {v.phase === 'signed-in' && <Button key="band-chat" label=" Chat" onPress={() => void showChat($)} />}
         {v.phase === 'signed-in' && wk.loaded && wk.ready > 0 && (
           <Button key="band-claim" label={wk.claiming ? ' Claiming…' : ' Claim'} onPress={() => void claimNext($)} />
@@ -1016,6 +1200,7 @@ export const register: Register = (on) => {
     const c = await read($, chat)
     const nv = await read($, nav)
     const wk = await read($, work)
+    const st = await read($, seat)
     const { Box, Button, Input, Text } = $.ui.resolve(e)
     const room = Math.max(3, (e.viewport?.rows ?? 24) - 9)
     if (v.phase === 'signed-in' && c.screen !== 'chat' && nv.screen === 'workspaces') {
@@ -1196,7 +1381,7 @@ export const register: Register = (on) => {
           <Box flexDirection="column">
             <Box>
               <Button key="open-chat" label={c.unread > 0 ? `Chat · ${c.unread} new` : 'Chat'} variant="primary" onPress={() => void showChat($)} />
-              <Button key="home-work" label="Work here · soon" onPress={() => $.ui.toast('Work here is coming soon')} />
+              <Button key="home-work" label={st.busy ? 'Joining…' : 'Work here'} onPress={() => void workHere($)} />
               <Button key="home-claim" label={wk.claiming ? 'Claiming…' : 'Claim next'} onPress={() => void claimNext($)} />
             </Box>
             {wk.loaded && (
@@ -1205,6 +1390,14 @@ export const register: Register = (on) => {
               </Text>
             )}
             {wk.note !== '' && <Text color={BRAND}>{oneLine(wk.note, 100)}</Text>}
+            {st.seat && (
+              <Box>
+                <Text wrap="truncate-end">{`In ${oneLine(st.seat.workspaceName, 40)} as ${oneLine(st.seat.name, 30)} `}</Text>
+                <Button key="home-leave" label="Leave" onPress={() => void leaveSeat($)} />
+              </Box>
+            )}
+            {st.note !== '' && <Text color={BRAND}>{oneLine(st.note, 100)}</Text>}
+            <Button key="home-auto" label={st.auto ? 'Join automatically in matching folders: on' : 'Join automatically in matching folders: off'} onPress={() => void setAuto($, !st.auto)} />
             <Box>
               <Button key="home-workspaces" label="Workspaces" onPress={() => void goTo($, 'workspaces')} />
               <Button key="home-people" label="People" onPress={() => void goTo($, 'people')} />
@@ -1264,7 +1457,7 @@ async function narrow($: Engine, mem: Mem, view: AuthView): Promise<string> {
       else if (pick === 'People') await narrowPeople($)
       else if (pick === 'More') {
         const bandWord = nv.band === 'hidden' ? 'Show band' : 'Hide band'
-        const more = await ask($, 'More', [bandWord, 'Claim next', 'Sign out', 'Work here · soon'])
+        const more = await ask($, 'More', [bandWord, 'Claim next', 'Sign out', 'Work here'])
         if (more === bandWord) {
           await setBand($, nv.band === 'hidden' ? 'shown' : 'hidden')
           return 'Done.'
@@ -1278,7 +1471,10 @@ async function narrow($: Engine, mem: Mem, view: AuthView): Promise<string> {
           $.ui.log(`HiveOp · ${await claimNext($)}`)
           return 'Done.'
         }
-        if (more === 'Work here · soon') $.ui.log('Coming soon.')
+        if (more === 'Work here') {
+          $.ui.log(`HiveOp · ${await workHere($)}`)
+          return 'Done.'
+        }
         continue
       } else return `HiveOp · ${view.name ?? 'signed in'}`
       return 'Done.'

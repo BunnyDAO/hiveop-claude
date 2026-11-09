@@ -135,7 +135,7 @@ test('home: header with the name and every button, on both surfaces', async ($, 
       expect(await pane.find({ key })).toBeDefined()
     }
     const shown = await text(pane)
-    expect(shown).toContain('Work here · soon')
+    expect(shown).toContain('Work here')
     expect(shown).toContain('Claim next')
     await pane.unmount()
   }

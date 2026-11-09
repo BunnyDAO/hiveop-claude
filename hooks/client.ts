@@ -304,3 +304,52 @@ export async function fetchWorkSummary($: Engine, wsId: string): Promise<{ summa
 export async function claimIssue($: Engine, wsId: string, issueId: string): Promise<Fetched | null> {
   return hiveop($, `/workspaces/${encodeURIComponent(wsId)}/issues/${encodeURIComponent(issueId)}/claim`, { method: 'POST' })
 }
+
+// ── adopted sessions (hcp-15) ──
+
+/** The folder's `origin` remote, or null when it has none. Never logged: it can carry a name. */
+export async function gitRemote($: Engine, cwd: string): Promise<string | null> {
+  try {
+    const r = await $.process.run(['git', 'remote', 'get-url', 'origin'], { cwd })
+    const url = r.stdout.trim()
+    return r.exitCode === 0 && url ? url : null
+  } catch {
+    return null
+  }
+}
+
+/** An opaque stand-in for the folder (two FNV-1a passes, 16 hex): the path itself never leaves the machine. */
+export function folderKey(cwd: string): string {
+  let a = 0x811c9dc5
+  let b = 0x01000193
+  for (let i = 0; i < cwd.length; i++) {
+    const c = cwd.charCodeAt(i)
+    a = Math.imul(a ^ c, 0x01000193) >>> 0
+    b = Math.imul(b ^ (c + i), 0x85ebca6b) >>> 0
+  }
+  return a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0')
+}
+
+export type Matched = { mine: Array<{ id: string; name: string }>; joinable: Array<{ id: string; name: string }> }
+
+export async function matchWorkspaces($: Engine, remote: string): Promise<Matched | null> {
+  const r = await hiveop($, `/me/workspaces/match?remote=${encodeURIComponent(remote)}`)
+  if (!r || !r.ok || !r.body) return null
+  const rows = (v: unknown): Array<{ id: string; name: string }> =>
+    Array.isArray(v)
+      ? (v as Array<Record<string, unknown>>).filter((x) => s(x?.id)).map((x) => ({ id: s(x.id), name: s(x.name).trim() || 'workspace' }))
+      : []
+  return { mine: rows(r.body.mine), joinable: rows(r.body.joinable) }
+}
+
+export type Adopted = { agentId: string; name: string; resumed: boolean }
+
+export async function adoptSession($: Engine, wsId: string, folder: string, session: string): Promise<{ seat: Adopted } | { fail: Fetched | null }> {
+  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/adopted-sessions`, { method: 'POST', body: { folderKey: folder, sessionKey: session } })
+  if (!r || !r.ok || !r.body || !s(r.body.agentId)) return { fail: r }
+  return { seat: { agentId: s(r.body.agentId), name: s(r.body.name).trim() || 'Claude Code', resumed: r.body.resumed === true } }
+}
+
+export async function leaveSession($: Engine, wsId: string, agentId: string): Promise<Fetched | null> {
+  return hiveop($, `/workspaces/${encodeURIComponent(wsId)}/adopted-sessions/${encodeURIComponent(agentId)}/offline`, { method: 'POST' })
+}

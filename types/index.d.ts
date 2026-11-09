@@ -65,8 +65,24 @@ export type WorkView = {
   claiming: boolean
 }
 
+/**
+ * This window's seat (hcp-15): what the folder points at, and the agent the person joined as.
+ * The prompt gets only the seat facts, never anything from chat.
+ */
+export type SeatView = {
+  // What the folder's git remote says: unchecked, no workspace, one of mine, or one I am not in.
+  folder: 'unchecked' | 'none' | 'mine' | 'joinable'
+  target: { id: string; name: string } | null
+  // Join automatically in matching folders (the person's choice, kept across sessions).
+  auto: boolean
+  seat: { workspaceId: string; workspaceName: string; agentId: string; name: string; claimed: string | null } | null
+  busy: boolean
+  // One plain line: what just happened, or why the server said no.
+  note: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    hiveop: { auth: Shaped<AuthView>; chat: Shaped<ChatView>; nav: Shaped<NavView>; work: Shaped<WorkView> }
+    hiveop: { auth: Shaped<AuthView>; chat: Shaped<ChatView>; nav: Shaped<NavView>; work: Shaped<WorkView>; seat: Shaped<SeatView> }
   }
 }
