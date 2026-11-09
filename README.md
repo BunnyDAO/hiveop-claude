@@ -44,3 +44,7 @@ and push and pull work the same way. The helper reads the plugin key from
 appears on a command line or in output. Repo access is limited to your own cloud
 workspaces and ends when the key is revoked or you sign out. Helper tests:
 `node --test bin/test/credential-helper.test.mjs`.
+
+## Key guard
+
+The session's own tools are refused when they try to read the sign-in key (`~/.hiveop`, the helper, `git credential fill`). Best effort; see `docs/security.md` for the storage decision and the gaps.

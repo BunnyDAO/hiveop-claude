@@ -43,6 +43,7 @@ import {
   workspaceUrl,
 } from './client'
 import { LOGO_PNG } from './logo'
+import { KEY_REFUSAL, keyGuardReason } from './keyguard'
 import { chooseCloneFolder, cloneRepo, cloneableUrl, helperValue, httpsOrigin, inlinePluginDir, pinHelper, normRemote, openFolder, rememberClone, scanClones, takeJoinOnOpen, writeJoinOnOpen } from './launch'
 
 const EMPTY_CHAT: ChatView = {
@@ -1460,6 +1461,13 @@ export const register: Register = (on) => {
     const auto = (await $.store.get(STORE_AUTO)) === true
     await update($, seat, (v) => ({ ...EMPTY_SEAT, auto, seat: v.seat }) as SeatView)
     await restore($, mem)
+    return next(e)
+  })
+
+  // Key guard (hcp-13): the session's own tools may not read or leak the Plugin key.
+  on('tool.call', async ($, e, next) => {
+    const home = await $.env.get('HOME')
+    if (keyGuardReason(e as Record<string, unknown>, home) !== null) return { deny: KEY_REFUSAL }
     return next(e)
   })
 
