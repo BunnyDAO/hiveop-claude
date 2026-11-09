@@ -32,7 +32,7 @@ import {
   setFollow,
   startPairing,
 } from './client'
-import { inlinePluginDir, normRemote, openFolder, rememberClone, scanClones, takeJoinOnOpen, writeJoinOnOpen } from './launch'
+import { chooseCloneFolder, cloneRepo, cloneableUrl, inlinePluginDir, normRemote, openFolder, rememberClone, scanClones, takeJoinOnOpen, writeJoinOnOpen } from './launch'
 
 const EMPTY_CHAT: ChatView = {
   workspace: null,
@@ -700,6 +700,39 @@ async function openRow($: Engine, row: WsRow, dir: string, canLaunch: boolean): 
   await writeJoinOnOpen($, folderKey(dir), row.id)
   const out = await openFolder($, dir, inlinePluginDir($.plugin.root, home), canLaunch)
   await setNav($, { note: out.ok ? `Opened ${oneLine(row.name, 40)}.` : out.command })
+}
+
+const cloning = new Set<string>()
+
+/** Get code: clone the repo with the person's own git access, remember the folder, then Open. */
+async function getCode($: Engine, row: WsRow, canLaunch: boolean): Promise<void> {
+  if (cloning.has(row.id)) return
+  cloning.add(row.id)
+  const name = oneLine(row.name, 40)
+  try {
+    const home = (await $.env.get('HOME')) ?? ''
+    const target = await chooseCloneFolder($, home, row.name, row.repoUrl)
+    if (!target.existing) {
+      await setNav($, { note: `Cloning ${name}…` })
+      let last = -1
+      const out = await cloneRepo($, row.repoUrl, target.dir, (p) => {
+        if (p === last) return
+        last = p
+        void setNav($, { note: `Cloning ${name}… ${p}%` })
+      })
+      if (!out.ok) {
+        await setNav($, { note: out.reason })
+        return
+      }
+    }
+    await rememberClone($, row.repoUrl, target.dir)
+    await setNav($, { clones: { ...(await read($, nav)).clones, [normRemote(row.repoUrl)]: target.dir } })
+    await openRow($, row, target.dir, canLaunch)
+  } catch {
+    await setNav($, { note: 'Clone failed.' })
+  } finally {
+    cloning.delete(row.id)
+  }
 }
 
 async function loadInvites($: Engine): Promise<void> {
@@ -1373,6 +1406,8 @@ export const register: Register = (on) => {
                   if (st.folder === 'mine' && st.target?.id === w.id)
                     return <Button key={`ws-code-${w.id}`} label="Code here" variant="primary" onPress={() => void joinSeat($, w)} />
                   if (dir) return <Button key={`ws-open-${w.id}`} label="Open" onPress={() => void openRow($, w, dir, e.surface === 'terminal')} />
+                  if (w.kind === 'github' && cloneableUrl(w.repoUrl))
+                    return <Button key={`ws-get-${w.id}`} label="Get code" onPress={() => void getCode($, w, e.surface === 'terminal')} />
                   return null
                 })()}
                 <Text>{' your Claude plan '}</Text>

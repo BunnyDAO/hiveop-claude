@@ -193,3 +193,79 @@ export async function openFolder($: Engine, dir: string, pluginDir: string | nul
     return { ok: false, command }
   }
 }
+
+// ── get code (hcp-23): clone with the person's own git access; HiveOp mints nothing ──
+
+/** A folder name for a workspace: lowercase letters, digits and dashes. */
+export function slugify(name: string): string {
+  const s = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50).replace(/-+$/, '')
+  return s || 'workspace'
+}
+
+/** Only plain ssh or https remotes, with no secret in the address itself. */
+export function cloneableUrl(url: string): boolean {
+  const u = url.trim()
+  if (!u || hasControl(u) || u.startsWith('-') || !normRemote(u)) return false
+  if (/^https?:\/\/[^/]*@/i.test(u)) return false
+  return /^(https?:\/\/|ssh:\/\/|[^@/\s]+@[^:/\s]+:)/i.test(u)
+}
+
+/** The percentage in a piece of git's --progress output (it rewrites one line with \r); null when none. */
+export function lastPercent(text: string): number | null {
+  const all = [...text.matchAll(/(\d{1,3})%/g)]
+  const last = all[all.length - 1]
+  if (!last) return null
+  const n = Number(last[1])
+  return n >= 0 && n <= 100 ? n : null
+}
+
+/** One line for a failed clone, from git's stderr. The output itself is never shown: it can carry credentialed URLs. */
+export function cloneFailureLine(stderr: string): string {
+  return /authentication failed|could not read (?:username|password)|permission denied|repository not found|not found|access denied|terminal prompts disabled|\b40[134]\b|publickey/i.test(stderr)
+    ? 'No GitHub access to this repo.'
+    : 'Clone failed.'
+}
+
+export type CloneTarget = { dir: string; existing: boolean }
+
+/** ~/HiveOp/<slug>, then -2, -3 ... when that folder is another repo. A folder that already is this repo is found. */
+export async function chooseCloneFolder($: Engine, home: string, name: string, repoUrl: string): Promise<CloneTarget> {
+  const want = normRemote(repoUrl)
+  const base = `${home.replace(/\/+$/, '')}/HiveOp/${slugify(name)}`
+  for (let n = 1; n < 100; n++) {
+    const dir = n === 1 ? base : `${base}-${n}`
+    try {
+      await $.fs.list(dir)
+    } catch {
+      return { dir, existing: false }
+    }
+    if ((await originOf($, dir)) === want) return { dir, existing: true }
+  }
+  return { dir: `${base}-${Date.now()}`, existing: false }
+}
+
+export type Cloned = { ok: true } | { ok: false; reason: string }
+
+/** git clone --progress into `dir`; `onPercent` hears each step. Failure comes back as one safe line. */
+export async function cloneRepo($: Engine, repoUrl: string, dir: string, onPercent: (n: number) => void): Promise<Cloned> {
+  if (!cloneableUrl(repoUrl) || hasControl(dir)) return { ok: false, reason: 'Clone failed.' }
+  let tail = ''
+  try {
+    const run = $.process.spawn({ argv: ['git', 'clone', '--progress', '--', repoUrl.trim(), dir], env: { GIT_TERMINAL_PROMPT: '0' } })
+    let code: number | null = null
+    while (true) {
+      const step = await run.next()
+      if (step.done) {
+        code = step.value.code
+        break
+      }
+      if (step.value.stream !== 'stderr') continue
+      tail = (tail + step.value.text).slice(-2000)
+      const p = lastPercent(step.value.text)
+      if (p !== null) onPercent(p)
+    }
+    return code === 0 ? { ok: true } : { ok: false, reason: cloneFailureLine(tail) }
+  } catch {
+    return { ok: false, reason: 'Clone failed.' }
+  }
+}
