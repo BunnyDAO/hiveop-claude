@@ -151,7 +151,53 @@ function toMsg(raw: unknown, me: string | null): ChatMsg | null {
   const who = mine ? 'self' : agentId ? `agent:${agentId}` : bareWallet(wallet) || `name:${name}`
   const photo = agentId ? '' : mine ? (me ?? wallet) : wallet
   const color = /^#[0-9a-fA-F]{6}$/.test(str(meta.agentColor)) ? str(meta.agentColor) : null
-  return { id, name, text, at, mine, who, photo, color }
+  // hcp-08: someone this person blocked or muted (here or in the app) is never shown.
+  const bare = bareWallet(wallet)
+  if (!mine && bare && hiddenWallets.has(bare)) return null
+  return { id, name, text, at, mine, who, photo, color, wallet: bare }
+}
+
+// ── hcp-08: message actions ──
+
+// Bare wallets of people this person blocked or muted; filled at sign-in from GET /me/blocks.
+const hiddenWallets = new Set<string>()
+
+async function loadBlocks($: Engine): Promise<void> {
+  const r = await hiveop($, '/me/blocks')
+  if (!r || !r.ok || !Array.isArray(r.body?.blocks)) return
+  hiddenWallets.clear()
+  for (const b of r.body.blocks as Array<{ wallet?: unknown }>) {
+    const w = bareWallet(str(b.wallet))
+    if (w) hiddenWallets.add(w)
+  }
+}
+
+async function setAct($: Engine, act: ChatView['act']): Promise<void> {
+  await update($, chat, (c) => ({ ...c, act }) as ChatView)
+}
+
+async function replyTo($: Engine, m: ChatMsg): Promise<void> {
+  const quote = m.text.replace(/\s+/g, ' ').trim()
+  const short = quote.length > 50 ? `${quote.slice(0, 49)}…` : quote
+  await update($, chat, (c) => ({ ...c, act: null, draft: `@${m.name} "${short}" ` }) as ChatView)
+}
+
+async function hidePerson($: Engine, m: ChatMsg, kind: 'mute' | 'block'): Promise<void> {
+  if (!m.wallet) return
+  const r = await hiveop($, `/me/blocks/${encodeURIComponent(m.wallet)}`, { method: 'POST', body: { kind } })
+  if (!r || !r.ok) {
+    $.ui.toast(`HiveOp · ${refusal(r)}`)
+    return
+  }
+  hiddenWallets.add(m.wallet)
+  await update($, chat, (c) => ({ ...c, act: null, messages: c.messages.filter((x) => x.wallet !== m.wallet || x.mine) }) as ChatView)
+  $.ui.toast(kind === 'mute' ? 'HiveOp · Muted.' : 'HiveOp · Blocked.')
+}
+
+async function sendReport($: Engine, m: ChatMsg, reason: 'spam' | 'abuse' | 'other'): Promise<void> {
+  const r = await hiveop($, '/reports', { method: 'POST', body: { targetKind: 'workspace_message', targetId: m.id, reason } })
+  await setAct($, null)
+  $.ui.toast(r && r.ok ? 'HiveOp · Reported. Thanks.' : `HiveOp · ${refusal(r)}`)
 }
 
 function bareWallet(w: string): string {
@@ -1497,6 +1543,7 @@ async function finishSignedIn($: Engine, mem: Mem) {
   }
   await update($, auth, () => ({ phase: 'signed-in', name: me.state === 'ok' ? me.name : null }) as AuthView)
   await update($, chat, (c) => ({ ...c, me: me.state === 'ok' ? me.wallet : c.me }))
+  await loadBlocks($)
   await restoreTabs($)
   startChat($, mem.chat)
   startCloudSlow($)
@@ -1564,6 +1611,7 @@ async function signIn($: Engine, mem: Mem): Promise<AuthView> {
 
 async function signOut($: Engine, mem: Mem) {
   stopGate(mem)
+  hiddenWallets.clear()
   await leaveSeat($)
   await update($, seat, (v) => ({ ...EMPTY_SEAT, auto: v.auto }) as SeatView)
   stopPolling(mem)
@@ -2054,7 +2102,37 @@ export const register: Register = (on) => {
                         <Text>{timeOf(m.at)}</Text>
                       </Box>
                       {run.map((x) => (
-                        <Text>{x.text}</Text>
+                        <Box flexDirection="column">
+                          <Box justifyContent="space-between" gap={1}>
+                            <Text>{x.text}</Text>
+                            {!x.mine && x.wallet && <Button key={`msg-act-${x.id}`} label="⋯" plain onPress={() => void setAct($, c.act?.id === x.id ? null : { id: x.id, step: 'menu' })} />}
+                          </Box>
+                          {c.act?.id === x.id && c.act.step === 'menu' && (
+                            <Box gap={2}>
+                              <Button key="msg-reply" label="Reply" plain onPress={() => void replyTo($, x)} />
+                              <Button key="msg-mute" label="Mute" plain onPress={() => void hidePerson($, x, 'mute')} />
+                              <Button key="msg-block" label="Block" plain onPress={() => void hidePerson($, x, 'block')} />
+                              <Button key="msg-report" label="Report" plain onPress={() => void setAct($, { id: x.id, step: 'report' })} />
+                              <Button key="msg-cancel" label="Cancel" plain onPress={() => void setAct($, null)} />
+                            </Box>
+                          )}
+                          {c.act?.id === x.id && c.act.step === 'report' && (
+                            <Box gap={2}>
+                              <Text>Why?</Text>
+                              <Button key="report-spam" label="Spam" plain onPress={() => void setAct($, { id: x.id, step: 'confirm', reason: 'spam' })} />
+                              <Button key="report-abuse" label="Abuse" plain onPress={() => void setAct($, { id: x.id, step: 'confirm', reason: 'abuse' })} />
+                              <Button key="report-other" label="Other" plain onPress={() => void setAct($, { id: x.id, step: 'confirm', reason: 'other' })} />
+                              <Button key="msg-cancel" label="Cancel" plain onPress={() => void setAct($, null)} />
+                            </Box>
+                          )}
+                          {c.act?.id === x.id && c.act.step === 'confirm' && c.act.reason && (
+                            <Box gap={2}>
+                              <Text color="yellow">Report this message?</Text>
+                              <Button key="report-confirm" label="Report" variant="primary" onPress={() => void sendReport($, x, c.act!.reason!)} />
+                              <Button key="msg-cancel" label="Cancel" plain onPress={() => void setAct($, null)} />
+                            </Box>
+                          )}
+                        </Box>
                       ))}
                     </Box>
                   </Box>

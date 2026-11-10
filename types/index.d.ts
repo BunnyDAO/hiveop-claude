@@ -12,7 +12,7 @@ export type AuthView =
 // `mine`: sent by the signed-in person themselves (not by one of their agents).
 // `who`: the run key (same person = same value; agents are their own). `photo`: the wallet whose photo to fetch, '' for none.
 // `color`: the person's HiveOp colour when the server sent one, else null (brand cyan).
-export type ChatMsg = { id: string; name: string; text: string; at: number; mine: boolean; who: string; photo: string; color: string | null }
+export type ChatMsg = { id: string; name: string; text: string; at: number; mine: boolean; who: string; photo: string; color: string | null; wallet?: string }
 
 /** Profile photos by wallet (hcp-21): base64 PNG bytes, or none. Other people's pictures: pane only. */
 export type PhotosView = { byWallet: Record<string, { state: 'loading' | 'ok' | 'none'; png: string | null }> }
@@ -41,6 +41,8 @@ export type ChatView = {
   // The signed-in person's wallet (account identity), for telling their own lines.
   me: string | null
   send: SendState
+  // hcp-08: the message whose actions are open, and how far (menu → report reason → confirm).
+  act?: { id: string; step: 'menu' | 'report' | 'confirm'; reason?: 'spam' | 'abuse' | 'other' } | null
 }
 
 /** One workspace as a list row. */
