@@ -98,6 +98,8 @@ const cloud = atom({ plugin: 'hiveop', key: 'cloud' } as const, EMPTY_CLOUD, { s
 const PANE = 'hiveop'
 const WAIT_MS = 25_000
 const MIN_GAP_MS = 3_500
+/** Scale: a random extra wait before reconnecting, so a message that wakes every plugin at once doesn't bring them all back in the same instant. */
+const GAP_JITTER_MS = 1_500
 const MAX_BACKOFF_MS = 60_000
 const HISTORY = 40
 const KEEP = 200
@@ -401,9 +403,23 @@ async function ensureLoaded($: Engine): Promise<void> {
 }
 
 // ── hcp-18: who else is online in the viewed room ──
-// Read when a room opens and when sync says presence changed in it. No timer.
+// Read when a room opens, and after sync says presence changed in it: at most
+// once per PRESENCE_EVERY_MS, at a random moment, because in a big room every
+// arrival reaches every open chat at once.
 
-const presenceRun = { inflight: false, again: false }
+const PRESENCE_EVERY_MS = 30_000
+const PRESENCE_SPREAD_MS = 4_000
+const presenceRun = { inflight: false, again: false, last: -Infinity, later: null as { cancel: () => void } | null }
+
+async function presenceSoon($: Engine): Promise<void> {
+  if (presenceRun.later) return
+  const now = await $.clock.now()
+  const wait = Math.max(0, presenceRun.last + PRESENCE_EVERY_MS - now) + 1000 + Math.floor(Math.random() * PRESENCE_SPREAD_MS)
+  presenceRun.later = $.clock.after(wait, () => {
+    presenceRun.later = null
+    void loadPresence($)
+  })
+}
 
 async function loadPresence($: Engine): Promise<void> {
   if (presenceRun.inflight) {
@@ -411,6 +427,7 @@ async function loadPresence($: Engine): Promise<void> {
     return
   }
   presenceRun.inflight = true
+  presenceRun.last = await $.clock.now()
   try {
     const v = await read($, chat)
     const wsId = v.workspace?.id
@@ -580,10 +597,11 @@ function startChat($: Engine, mem: ChatMem): void {
   })
 }
 
+/** Full jitter: 1 s plus a random share of a doubling window (5 s, 9 s, 17 s … capped at 60 s). After a server restart, thousands of plugins come back spread out, not in one second. */
 function backoff(mem: ChatMem): number {
   mem.failures += 1
-  const base = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(mem.failures, 6))
-  return Math.round(base * (0.5 + Math.random() * 0.5))
+  const window = Math.min(MAX_BACKOFF_MS - 1000, 4000 * 2 ** Math.min(mem.failures - 1, 5))
+  return 1000 + Math.round(Math.random() * window)
 }
 
 /** The delay a failed request asks for; null when the key itself was refused. */
@@ -616,7 +634,8 @@ async function step($: Engine, mem: ChatMem, gen: number): Promise<void> {
   }
   if (!mem.running || mem.gen !== gen) return
   const spent = (await $.clock.now()) - started
-  mem.timer = $.clock.after(Math.max(delay, MIN_GAP_MS - spent, 0), () => {
+  const gap = MIN_GAP_MS + Math.floor(Math.random() * GAP_JITTER_MS)
+  mem.timer = $.clock.after(Math.max(delay, gap - spent, 0), () => {
     void step($, mem, gen)
   })
 }
@@ -660,7 +679,7 @@ async function syncOnce($: Engine, mem: ChatMem): Promise<number> {
   const v = await read($, chat)
   await onWorkEvents($, events, v.me)
   await onAlertEvents($, events)
-  if (events.some((ev) => ev.type === 'workspace:presence_changed' && ev.workspaceId === v.workspace?.id)) await loadPresence($)
+  if (events.some((ev) => ev.type === 'workspace:presence_changed' && ev.workspaceId === v.workspace?.id)) await presenceSoon($)
   const incoming: ChatMsg[] = []
   const elsewhere = new Map<string, number>()
   for (const ev of events) {

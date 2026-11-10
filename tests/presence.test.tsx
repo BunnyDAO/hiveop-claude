@@ -156,8 +156,25 @@ test('hcp-18: a presence change from sync refreshes the list', async ($, on) => 
   w.online = ['BeaWallet', 'CyWallet']
   w.pendingRaw = [{ type: 'workspace:presence_changed', workspaceId: WS }]
   await w.clock.advance(GAP * 2)
+  // scale: not at once — at most every 30 s, at a random moment within a few seconds after
+  expect(presenceReads(w).length).toBe(before)
+  await w.clock.advance(30_000)
   expect(presenceReads(w).length).toBe(before + 1)
   expect(await text(pane)).toContain('2 online')
+  await pane.unmount()
+})
+
+test('scale: a burst of arrivals reads presence once, not once per arrival', async ($, on) => {
+  const w = world(on)
+  const pane = await openPane($, w)
+  const before = presenceReads(w).length
+  // three arrivals inside one 30 s window
+  for (let i = 0; i < 3; i++) {
+    w.pendingRaw = [{ type: 'workspace:presence_changed', workspaceId: WS }]
+    await w.clock.advance(GAP * 2)
+  }
+  await w.clock.advance(40_000)
+  expect(presenceReads(w).length).toBe(before + 1)
   await pane.unmount()
 })
 

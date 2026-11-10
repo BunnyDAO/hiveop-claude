@@ -238,7 +238,7 @@ test('trouble backs off', async ($, on) => {
   const w = world(on)
   await start($)
   w.syncReply = { status: 500 }
-  await w.clock.advance(GAP + 200)
+  await w.clock.advance(GAP + 1_500 + 200) // the gap plus its random spread
   const n = syncs(w).length
   await w.clock.advance(400)
   expect(syncs(w).length).toBe(n) // not again at once
@@ -248,7 +248,7 @@ test('a 429 on sync waits out Retry-After', async ($, on) => {
   const w = world(on)
   await start($)
   w.syncReply = { status: 429, headers: { 'Retry-After': '40' } }
-  await w.clock.advance(GAP + 200)
+  await w.clock.advance(GAP + 1_500 + 200) // the gap plus its random spread
   const n = syncs(w).length
   await w.clock.advance(35_000)
   expect(syncs(w).length).toBe(n)
