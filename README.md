@@ -1,6 +1,16 @@
 # HiveOp for Claude Code
 
-Work in progress. Run `/hiveop` in Claude Code and press **Sign in**.
+Work in progress.
+
+## Install
+
+In Claude Code:
+
+```
+/plugin install hiveop --marketplace BunnyDAO/hiveop-claude
+```
+
+Then run `/hiveop` and press **Sign in**.
 
 The plugin signs in with a short code you approve at app.hiveop.io. It holds a
 limited key (not your API key), stored in `~/.hiveop/claude-plugin.json`

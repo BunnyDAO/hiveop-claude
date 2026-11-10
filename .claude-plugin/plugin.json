@@ -2,5 +2,8 @@
   "name": "hiveop",
   "version": "0.2.0",
   "description": "HiveOp for Claude Code: sign in, and your HiveOp account follows you into the terminal.",
+  "author": {
+    "name": "Wenrwa, LLC"
+  },
   "types": "./types/index.d.ts"
 }
