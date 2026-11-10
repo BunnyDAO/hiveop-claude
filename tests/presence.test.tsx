@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { LOGO_PNG } from '../hooks/logo'
 
 const HOME = '/home/ada'
 const KEY = 'wm_ct_SECRETKEYSECRETKEY'
@@ -119,7 +120,8 @@ function world(on: any, start: Partial<World> = {}): World {
   return w
 }
 
-const text = async (ui: any) => JSON.stringify(await ui.drawn())
+// The header logo's bytes are not content: drop them before scanning what is drawn.
+const text = async (ui: any) => JSON.stringify(await ui.drawn()).split(LOGO_PNG).join('')
 const syncs = (w: World) => w.calls.filter((c) => c.url.includes('/me/sync') && c.url.includes('cursor='))
 const posts = (w: World) => w.calls.filter((c) => c.method === 'POST')
 const start = async ($: any) => $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })

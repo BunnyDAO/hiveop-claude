@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { LOGO_PNG } from '../hooks/logo'
 
 const HOME = '/home/ada'
 const KEY = 'wm_ct_SECRETKEYSECRETKEY'
@@ -121,7 +122,8 @@ function world(on: any, start: Partial<World> = {}): World {
 }
 
 const start = async ($: any) => $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-const text = async (ui: any) => JSON.stringify(await ui.drawn())
+// The header logo's bytes are not content: drop them before scanning what is drawn.
+const text = async (ui: any) => JSON.stringify(await ui.drawn()).split(LOGO_PNG).join('')
 const rows = async (ui: any) => (await ui.findAll({ type: 'Text' })).map((t: any) => t.text).join('\n')
 const mutations = (w: World) => w.calls.filter((c) => c.method !== 'GET')
 const open = async ($: any, surface: string, args = '') => {
@@ -134,7 +136,7 @@ test('home: header with the name and every button, on both surfaces', async ($, 
   await start($)
   for (const surface of SURFACES) {
     const pane = await open($, surface)
-    expect(await text(pane)).toContain('⬡ HiveOp')
+    expect(await text(pane)).toContain(surface === 'terminal' ? '"head-logo"' : '⬡ HiveOp')
     expect(await text(pane)).toContain('Ada')
     for (const key of ['open-chat', 'home-alerts', 'home-workspaces', 'home-people', 'home-swarm', 'home-global', 'home-auto', 'sign-out']) {
       expect(await pane.find({ key })).toBeDefined()

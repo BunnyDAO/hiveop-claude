@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { LOGO_PNG } from '../hooks/logo'
 
 const HOME = '/home/ada'
 const KEY = 'wm_ct_SECRETKEYSECRETKEY'
@@ -116,7 +117,8 @@ function world(on: any, start: Partial<World> = {}): World {
   return w
 }
 
-const text = async (ui: any) => JSON.stringify(await ui.drawn())
+// The header logo's bytes are not content: drop them before scanning what is drawn.
+const text = async (ui: any) => JSON.stringify(await ui.drawn()).split(LOGO_PNG).join('')
 const start = async ($: any) => $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 const OK: Reply = { status: 200, text: PNG }
@@ -166,7 +168,7 @@ test('desktop: coloured initials, never an Image, and no photo bytes shown', asy
   await open($, w)
   await shownOn($, w, 'desktop')
   const out = await shownOn($, w, 'desktop')
-  expect(out).not.toContain('Image')
+  expect(out).not.toMatch(/"type":"Image","props":\{(?!"key":"head-logo")/)
   expect(out).not.toContain(PNG)
   expect(count(out, 'BL')).toBe(1)
   expect(out).toContain('#22D3EE')
@@ -180,7 +182,7 @@ test('a missing or failed photo falls back to initials on the terminal', async (
   await open($, w)
   await shownOn($, w, 'terminal')
   const out = await shownOn($, w, 'terminal')
-  expect(out).not.toContain('Image')
+  expect(out).not.toMatch(/"type":"Image","props":\{(?!"key":"head-logo")/)
   expect(out).toContain('BL')
   expect(out).toContain('CD')
 })
@@ -189,7 +191,7 @@ test('garbage bytes are treated as no photo', async ($, on) => {
   const w = world(on, { ...room(msg('m1', 'one', 'Bea Lee', 'BeaWallet')), photos: { BeaWallet: { status: 200, text: '<html>nope</html>' } } })
   await open($, w)
   await shownOn($, w, 'terminal')
-  expect(await shownOn($, w, 'terminal')).not.toContain('Image')
+  expect(await shownOn($, w, 'terminal')).not.toMatch(/"type":"Image","props":\{(?!"key":"head-logo")/)
 })
 
 test('each person is fetched once per session, failures included, across surfaces and redraws', async ($, on) => {

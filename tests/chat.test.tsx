@@ -310,7 +310,9 @@ test('a run of messages shows the name and time once, the input is last, the hea
     const rows = (await pane.findAll({ type: 'Text' })).map((t: any) => t.text)
     expect(rows.filter((t: string) => t === 'Bea')).toHaveLength(1)
     expect(rows.filter((t: string) => /^\d\d:\d\d$/.test(t))).toHaveLength(1)
-    expect(rows).toEqual(expect.arrayContaining(['one', 'two', 'three', '⬡ HiveOp']))
+    expect(rows).toEqual(expect.arrayContaining(['one', 'two', 'three', surface === 'terminal' ? 'HiveOp' : '⬡ HiveOp']))
+    // The header logo is the real mark in a terminal (2x1 cells), the glyph elsewhere.
+    expect(Boolean(await pane.find({ key: 'head-logo' }))).toBe(surface === 'terminal')
     const all = await text(pane)
     expect(all.lastIndexOf('chat-input')).toBeGreaterThan(all.lastIndexOf('three'))
     expect(all.lastIndexOf('chat-input')).toBeGreaterThan(all.lastIndexOf('chat-close'))
@@ -331,8 +333,8 @@ test('band: plain hotkey buttons, the logo Image on the terminal and the glyph o
     }
     if (surface === 'terminal') {
       expect(shown).toContain('"type":"Image"')
-      expect(shown).toContain('"columns":8')
-      expect(shown).toContain('"rows":4')
+      expect(shown).toContain('"columns":2')
+      expect(shown).toContain('"rows":1')
     } else {
       expect(shown).not.toContain('Image')
       expect(shown).toContain('⬡')

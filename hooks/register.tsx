@@ -1849,14 +1849,21 @@ function bandText(v: AuthView): string {
 // HiveOp brand cyan (app.hiveop.io accent).
 const BRAND = '#22D3EE'
 
-type Ui = Pick<Elements['terminal'], 'Box' | 'Text'>
+type Ui = Pick<Elements['terminal'], 'Box' | 'Text'> & { Image?: Elements['terminal']['Image'] }
 
 /** The pane's top line: the mark and name left, the session's seat right. */
-function paneHead(ui: Ui, right: string) {
+function paneHead(ui: Ui, right: string, logo: boolean) {
   const { Box, Text } = ui
   return (
     <Box justifyContent="space-between" paddingX={1}>
-      <Text bold color={BRAND}>⬡ HiveOp</Text>
+      {logo && ui.Image ? (
+        <Box gap={1}>
+          <ui.Image key="head-logo" source={{ png: LOGO_PNG }} columns={2} rows={1} alt="⬡" />
+          <Text bold color={BRAND}>HiveOp</Text>
+        </Box>
+      ) : (
+        <Text bold color={BRAND}>⬡ HiveOp</Text>
+      )}
       <Text wrap="truncate-end">{right}</Text>
     </Box>
   )
@@ -2003,9 +2010,9 @@ export const register: Register = (on) => {
     const hot = () => String(++n)
     const signedIn = v.phase === 'signed-in'
     return (
-      <Box gap={2} alignItems="center">
-        <Box width={Img ? 9 : 3}>
-          {Img ? <Img key="band-logo" source={{ png: LOGO_PNG }} columns={8} rows={4} alt="⬡" /> : <Text bold color={BRAND}>⬡</Text>}
+      <Box gap={2}>
+        <Box width={3}>
+          {Img ? <Img key="band-logo" source={{ png: LOGO_PNG }} columns={2} rows={1} alt="⬡" /> : <Text bold color={BRAND}>⬡</Text>}
         </Box>
         <Box flexGrow={1}>
           <Text wrap="truncate-end">
@@ -2073,7 +2080,7 @@ export const register: Register = (on) => {
       const ex = nv.explore
       return (
         <Box flexDirection="column">
-          {paneHead(ui, seatText)}
+          {paneHead(ui, seatText, e.surface === 'terminal')}
           <Box paddingX={1} gap={2}>
             {tab('tab-mine', 'Mine', nv.tab === 'mine', () => void showTab($, 'mine'))}
             {tab('tab-invites', nv.invites && nv.invites.length > 0 ? `Invites · ${nv.invites.length}` : 'Invites', nv.tab === 'invites', () => void showTab($, 'invites'))}
@@ -2192,7 +2199,7 @@ export const register: Register = (on) => {
       const rowsS = nv.swarm?.rows
       return (
         <Box flexDirection="column">
-          {paneHead(ui, seatText)}
+          {paneHead(ui, seatText, e.surface === 'terminal')}
           <Box paddingX={1} gap={2}>
             <Text bold color={BRAND}>Swarm</Text>
             <Box flexGrow={1} />
@@ -2215,7 +2222,7 @@ export const register: Register = (on) => {
       const rowsA = nv.alerts?.rows
       return (
         <Box flexDirection="column">
-          {paneHead(ui, seatText)}
+          {paneHead(ui, seatText, e.surface === 'terminal')}
           <Box paddingX={1} gap={2}>
             <Text bold color={BRAND}>Alerts</Text>
             <Box flexGrow={1} />
@@ -2241,7 +2248,7 @@ export const register: Register = (on) => {
       const pp = nv.people
       return (
         <Box flexDirection="column">
-          {paneHead(ui, seatText)}
+          {paneHead(ui, seatText, e.surface === 'terminal')}
           <Box paddingX={1} gap={2}>
             <Text bold color={BRAND}>People</Text>
             <Box flexGrow={1} />
@@ -2308,7 +2315,7 @@ export const register: Register = (on) => {
       }
       return (
         <Box flexDirection="column" height={rows}>
-          {paneHead(ui, seatText)}
+          {paneHead(ui, seatText, e.surface === 'terminal')}
           <Box paddingX={1} gap={2}>
             {c.tabs.map((t) =>
               tab(
@@ -2426,7 +2433,7 @@ export const register: Register = (on) => {
     }
     return (
       <Box flexDirection="column">
-        {paneHead(ui, v.phase === 'signed-in' ? (v.name ?? 'you') : '')}
+        {paneHead(ui, v.phase === 'signed-in' ? (v.name ?? 'you') : '', e.surface === 'terminal')}
         {paneRule(ui, cols)}
         <Box flexDirection="column" paddingX={1}>
         {v.phase === 'signed-out' && (
