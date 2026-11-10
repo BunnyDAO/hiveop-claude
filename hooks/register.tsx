@@ -16,7 +16,9 @@ import {
   fetchMe,
   fileRepoAccess,
   checkGate,
+  finishWork,
   folderKey,
+  getIssue,
   fetchAvatar,
   followingAmong,
   forgetKey,
@@ -29,6 +31,7 @@ import {
   listInvites,
   listMine,
   listPilots,
+  listReady,
   takeGate,
   loadKey,
   matchWorkspaces,
@@ -592,7 +595,8 @@ async function refreshWork($: Engine, keepNote = false): Promise<void> {
 /** Claim the top ready item as the person. Says the server's reason on a refusal. */
 async function claimNext($: Engine): Promise<string> {
   if ((await read($, work)).claiming) return ''
-  const wsId = (await read($, seat)).seat?.workspaceId
+  const st = (await read($, seat)).seat
+  const wsId = st?.workspaceId
   if (!wsId) {
     await setSeat($, { note: 'Join a workspace first.' })
     return 'Join a workspace first.'
@@ -605,7 +609,8 @@ async function claimNext($: Engine): Promise<string> {
     if ('fail' in fresh) note = refusal(fresh.fail)
     else if (!fresh.summary.next) note = 'Nothing ready to claim.'
     else {
-      const r = await claimIssue($, wsId, fresh.summary.next.id)
+      // hcp-17: while joined, the claim is the agent's, not the person's.
+      const r = await claimIssue($, wsId, fresh.summary.next.id, st?.agentId)
       note = r && r.ok ? `Claimed: ${oneLine(fresh.summary.next.title)}` : refusal(r)
       if (r && r.ok) await noteClaim($, wsId, fresh.summary.next.title)
     }
@@ -1059,7 +1064,7 @@ function oneLinePrompt(t: string, max: number): string {
 function seatText(v: NonNullable<SeatView['seat']>): string {
   const ws = oneLinePrompt(v.workspaceName, 60)
   const claimed = v.claimed ? ` Claimed item: ${oneLinePrompt(v.claimed, 80)}.` : ''
-  return `HiveOp seat: this session is the agent "${oneLinePrompt(v.name, 40)}" in the HiveOp workspace "${ws}" (id ${v.workspaceId}).${claimed}`
+  return `HiveOp seat: this session is the agent "${oneLinePrompt(v.name, 40)}" in the HiveOp workspace "${ws}" (id ${v.workspaceId}).${claimed} Work tools (credited to this agent, this workspace only): mcp__hiveop__next_work, mcp__hiveop__claim_work, mcp__hiveop__finish_work.`
 }
 
 /** Look at the folder's git remote and ask HiveOp which workspace it belongs to. Joins by itself when the person chose that. */
@@ -1358,6 +1363,84 @@ const ENDED_TEXT: Record<Extract<AuthView, { phase: 'ended' }>['reason'], string
   rejected: 'HiveOp no longer accepts this sign-in.',
 }
 
+// ── hcp-17: work tools for the model, pinned to this window's seat ──
+
+const WORK_TOOLS = [
+  {
+    name: 'next_work',
+    description: "List the ready work items in this window's HiveOp workspace, best first. Only works when this Claude Code window is joined as a HiveOp agent.",
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'claim_work',
+    description: "Claim a ready HiveOp work item for this window's agent (the top ready one unless issueId is given). Returns the item's title and description.",
+    inputSchema: { type: 'object', properties: { issueId: { type: 'string', description: 'A ready item id from next_work (optional).' } } },
+  },
+  {
+    name: 'finish_work',
+    description: "Finish this agent's claimed HiveOp item: HiveOp checks its linked PR and, on a pass, submits it and claims the next ready item.",
+    inputSchema: { type: 'object', properties: {} },
+  },
+]
+
+const TOOL_NOT_JOINED = 'Not joined: this Claude Code window is not a HiveOp agent. The person can press Join as agent on the HiveOp band.'
+
+function itemLine(i: { id: string; title: string; priority: string | null }): string {
+  return `- ${oneLinePrompt(i.title, 100)} (id ${i.id}${i.priority ? `, ${i.priority}` : ''})`
+}
+
+async function toolNextWork($: Engine): Promise<string> {
+  const st = (await read($, seat)).seat
+  if (!st) return TOOL_NOT_JOINED
+  const r = await listReady($, st.workspaceId, st.agentId)
+  if ('fail' in r) return refusal(r.fail)
+  if (r.items.length === 0) return 'Nothing is ready in this workspace.'
+  return `Ready in ${oneLinePrompt(st.workspaceName, 60)}, best first:\n${r.items.slice(0, 10).map(itemLine).join('\n')}`
+}
+
+async function toolClaimWork($: Engine, input: Record<string, unknown>): Promise<string> {
+  const st = (await read($, seat)).seat
+  if (!st) return TOOL_NOT_JOINED
+  let id = typeof input.issueId === 'string' ? input.issueId.trim().slice(0, 64) : ''
+  if (!id) {
+    const r = await listReady($, st.workspaceId, st.agentId)
+    if ('fail' in r) return refusal(r.fail)
+    if (r.items.length === 0) return 'Nothing is ready in this workspace.'
+    id = r.items[0]!.id
+  }
+  const c = await claimIssue($, st.workspaceId, id, st.agentId)
+  if (!c || !c.ok) return `Not claimed: ${refusal(c)}`
+  const item = await getIssue($, st.workspaceId, id, st.agentId)
+  const title = item?.title ?? 'untitled'
+  await noteClaim($, st.workspaceId, title)
+  await refreshWork($, true)
+  const desc = item?.description ? `\n\n${item.description}` : ''
+  return `Claimed for ${oneLinePrompt(st.name, 40)}: ${oneLinePrompt(title, 120)} (id ${id}).${desc}\n\nWhen it is done and its PR is open (commit trailer HiveOp-Issue: ${id}), call mcp__hiveop__finish_work.`
+}
+
+async function toolFinishWork($: Engine): Promise<string> {
+  const st = (await read($, seat)).seat
+  if (!st) return TOOL_NOT_JOINED
+  const r = await finishWork($, st.workspaceId, st.agentId)
+  if (!r || !r.ok || !r.body) return `Not finished: ${refusal(r)}`
+  const verdict = r.body.verdict as { outcome?: unknown; detail?: unknown } | undefined
+  const outcome = typeof verdict?.outcome === 'string' ? verdict.outcome : 'unknown'
+  const drain = r.body.drain as { drained?: unknown; nextIssueId?: unknown } | undefined
+  await refreshWork($, true)
+  if (outcome !== 'pass') {
+    const detail = typeof verdict?.detail === 'string' ? verdict.detail.slice(0, 400) : ''
+    return `Checks did not pass (${outcome}).${detail ? ` ${detail}` : ''}`
+  }
+  await update($, seat, (v) => (v.seat ? ({ ...v, seat: { ...v.seat, claimed: null } } as SeatView) : v))
+  const nextId = drain?.drained && typeof drain.nextIssueId === 'string' ? drain.nextIssueId : null
+  if (!nextId) return 'Checks passed; the item is submitted. Nothing else is claimed.'
+  const next = await getIssue($, st.workspaceId, nextId, st.agentId)
+  const title = next?.title ?? 'untitled'
+  await noteClaim($, st.workspaceId, title)
+  const desc = next?.description ? `\n\n${next.description}` : ''
+  return `Checks passed; the item is submitted. Claimed next for this agent: ${oneLinePrompt(title, 120)} (id ${nextId}).${desc}`
+}
+
 // ── hcp-16: an adopted session's live activity ──
 
 // Tool reports go out at most once per ACT_GAP_MS; the rest are folded into one pending report.
@@ -1553,6 +1636,8 @@ export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'hiveop', description: 'HiveOp: sign in, chat, your account in Claude Code' })
     await $.command.register({ name: 'say', description: 'Say something in your HiveOp workspace chat', argumentHint: '<message>' })
+    // hcp-17: work tools, pinned to this window's seat (they say "not joined" without one). No chat tools.
+    for (const t of WORK_TOOLS) await $.tool.register(t).catch(() => undefined)
     await restoreNav($)
     stopCloud()
     await update($, cloud, () => EMPTY_CLOUD)
@@ -1579,6 +1664,14 @@ export const register: Register = (on) => {
     const a = activityOf(e as Record<string, unknown>, sm.cwd)
     if (a) await reportTool($, a)
     return r
+  })
+
+  // hcp-17: this plugin's own work tools (a regex: the generated tool types list them only after a reload).
+  on('tool.call', { tool: /^mcp__hiveop__(next|claim|finish)_work$/ }, async ($, e) => {
+    const input = e as unknown as Record<string, unknown>
+    const name = String(input.tool ?? '')
+    const text = name.endsWith('next_work') ? await toolNextWork($) : name.endsWith('claim_work') ? await toolClaimWork($, input) : await toolFinishWork($)
+    return { result: text } as never
   })
 
   on('turn.start', async ($, e, next) => {

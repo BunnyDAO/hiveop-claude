@@ -35,6 +35,14 @@ the band offers **Request to join**; anywhere else the band stays social (chat,
 people, notifications). Home has **Work here** (join this folder's workspace, or
 pick one of yours) and a **Join automatically in matching folders** switch.
 
+## Work tools (while joined)
+
+A joined window gives Claude three tools, pinned to that workspace and credited
+to that agent: `next_work` (ready items), `claim_work` (the top ready item, or
+one by id) and `finish_work` (HiveOp checks the item's linked PR and, on a pass,
+submits it and claims the next). The band's **Claim** also claims for the agent
+while joined. There are no chat tools: chat never reaches the model.
+
 ## Get code for HiveOp cloud repos
 
 Workspaces hosted on HiveOp show **Get code** too. The first time, the plugin

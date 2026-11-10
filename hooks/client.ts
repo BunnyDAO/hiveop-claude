@@ -193,13 +193,16 @@ export async function checkGate($: Engine): Promise<Gate | null> {
   }
 }
 
-export async function hiveop($: Engine, path: string, init: { method?: string; body?: unknown } = {}): Promise<Fetched | null> {
+/** `agent`: act as this window's own adopted agent (hcp-17); HiveOp checks it is ours, online and in that workspace. */
+export async function hiveop($: Engine, path: string, init: { method?: string; body?: unknown; agent?: string } = {}): Promise<Fetched | null> {
   const key = await loadKey($)
   if (!key) return null
   try {
+    const h = headers(key)
+    if (init.agent) h['X-HiveOp-Agent'] = init.agent
     const res = await $.http.fetch(`${await apiBase($)}${path}`, {
       method: init.method ?? 'GET',
-      headers: headers(key),
+      headers: h,
       body: init.body === undefined ? undefined : JSON.stringify(init.body),
     })
     const body = parse(res.text)
@@ -359,9 +362,42 @@ export async function fetchWorkSummary($: Engine, wsId: string): Promise<{ summa
   return { summary: { ready: n(r.body.ready), inProgress: n(r.body.inProgress), next } }
 }
 
-/** Claim as the person. The server's one-at-a-time rule and its words come back in `refusal`. */
-export async function claimIssue($: Engine, wsId: string, issueId: string): Promise<Fetched | null> {
-  return hiveop($, `/workspaces/${encodeURIComponent(wsId)}/issues/${encodeURIComponent(issueId)}/claim`, { method: 'POST' })
+/** Claim as the person, or as this window's adopted agent when `agent` is given (hcp-17). The server's words come back in `refusal`. */
+export async function claimIssue($: Engine, wsId: string, issueId: string, agent?: string): Promise<Fetched | null> {
+  return hiveop($, `/workspaces/${encodeURIComponent(wsId)}/issues/${encodeURIComponent(issueId)}/claim`, { method: 'POST', agent })
+}
+
+// ── hcp-17: work tools for the model, pinned to the seat ──
+
+export type WorkItem = { id: string; title: string; description: string; priority: string | null }
+
+function toItem(raw: unknown): WorkItem | null {
+  const o = raw as Record<string, unknown> | null
+  if (!o || !s(o.id)) return null
+  return {
+    id: s(o.id),
+    title: s(o.title).trim() || 'untitled',
+    description: s(o.description).trim().slice(0, 4000),
+    priority: s(o.priority) || null,
+  }
+}
+
+/** Ready items in the seat's workspace, best first. */
+export async function listReady($: Engine, wsId: string, agent: string): Promise<{ items: WorkItem[] } | { fail: Fetched | null }> {
+  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/issues/ready`, { agent })
+  if (!r || !r.ok || !r.body) return { fail: r }
+  const list = Array.isArray(r.body.issues) ? r.body.issues : []
+  return { items: list.map(toItem).filter((i): i is WorkItem => i !== null) }
+}
+
+export async function getIssue($: Engine, wsId: string, issueId: string, agent: string): Promise<WorkItem | null> {
+  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/issues/${encodeURIComponent(issueId)}`, { agent })
+  return r && r.ok && r.body ? toItem(r.body.issue) : null
+}
+
+/** Finish: HiveOp verifies this agent's claimed item (its linked PR) and, on a pass, submits it and claims the next. */
+export async function finishWork($: Engine, wsId: string, agent: string): Promise<Fetched | null> {
+  return hiveop($, `/workspaces/${encodeURIComponent(wsId)}/verification/run`, { method: 'POST', body: {}, agent })
 }
 
 // ── adopted sessions (hcp-15) ──
