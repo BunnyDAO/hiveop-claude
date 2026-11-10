@@ -86,7 +86,7 @@ test('signed out: the band offers Sign in and nothing polls', async ($, on) => {
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...BAND, surface })
-    expect(await ui.find({ type: 'Text', text: /Sign in/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Not signed in/ })).toBeDefined()
     expect(await ui.find({ key: 'band-sign-in' })).toBeDefined()
     await ui.unmount()
   }

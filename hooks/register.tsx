@@ -1845,7 +1845,7 @@ async function restore($: Engine, mem: Mem) {
 function bandText(v: AuthView): string {
   switch (v.phase) {
     case 'signed-out':
-      return '  Sign in'
+      return '  Not signed in'
     case 'pairing':
       return `  code ${v.code} · approve at app.hiveop.io/claude-code`
     case 'signed-in':

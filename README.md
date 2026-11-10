@@ -10,7 +10,8 @@ In Claude Code:
 /plugin install hiveop --marketplace Wenrwa/hiveop-claude
 ```
 
-Then run `/hiveop` and press **Sign in**.
+Then start Claude Code. The HiveOp bar above the prompt has a **Sign in**
+button; press it and approve the code in your browser. `/hiveop` opens home.
 
 The plugin signs in with a short code you approve at app.hiveop.io. It holds a
 limited key (not your API key), stored in `~/.hiveop/claude-plugin.json`
