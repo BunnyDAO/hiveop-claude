@@ -7,7 +7,7 @@ Work in progress.
 In Claude Code:
 
 ```
-/plugin install hiveop --marketplace BunnyDAO/hiveop-claude
+/plugin install hiveop --marketplace Wenrwa/hiveop-claude
 ```
 
 Then run `/hiveop` and press **Sign in**.
