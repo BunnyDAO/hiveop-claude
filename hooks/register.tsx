@@ -46,6 +46,8 @@ import {
 } from './client'
 import type { Gate } from './client'
 import { LOGO_PNG } from './logo'
+import { activityOf, mergeActivity } from './activity'
+import type { ToolActivity } from './activity'
 import { KEY_REFUSAL, keyGuardReason } from './keyguard'
 import { chooseCloneFolder, cloneRepo, cloneableUrl, helperValue, httpsOrigin, inlinePluginDir, pinHelper, normRemote, openFolder, rememberClone, scanClones, takeJoinOnOpen, writeJoinOnOpen } from './launch'
 
@@ -1356,6 +1358,46 @@ const ENDED_TEXT: Record<Extract<AuthView, { phase: 'ended' }>['reason'], string
   rejected: 'HiveOp no longer accepts this sign-in.',
 }
 
+// ── hcp-16: an adopted session's live activity ──
+
+// Tool reports go out at most once per ACT_GAP_MS; the rest are folded into one pending report.
+const ACT_GAP_MS = 2000
+const act: { last: number; pending: ToolActivity | null; timer: Cancel | null } = { last: 0, pending: null, timer: null }
+
+/** Posts one activity report for this window's seat, if it has one. Fire and forget. */
+async function reportActivity($: Engine, body: { kind: 'start' | 'tool' | 'stop'; filePaths?: string[]; thinking?: string }): Promise<void> {
+  const st = (await read($, seat)).seat
+  if (!st) return
+  await hiveop($, `/workspaces/${encodeURIComponent(st.workspaceId)}/adopted-sessions/${encodeURIComponent(st.agentId)}/activity`, { method: 'POST', body })
+}
+
+async function flushTool($: Engine): Promise<void> {
+  act.timer = null
+  const p = act.pending
+  act.pending = null
+  if (!p) return
+  act.last = await $.clock.now()
+  await reportActivity($, { kind: 'tool', filePaths: p.filePaths, thinking: p.thinking })
+}
+
+async function reportTool($: Engine, a: ToolActivity): Promise<void> {
+  if (!(await read($, seat)).seat) return
+  act.pending = mergeActivity(act.pending, a)
+  if (act.timer) return
+  const wait = act.last + ACT_GAP_MS - (await $.clock.now())
+  if (wait <= 0) return flushTool($)
+  act.timer = $.clock.after(wait, () => {
+    void flushTool($)
+  })
+}
+
+async function reportStop($: Engine): Promise<void> {
+  act.timer?.cancel()
+  if (act.pending) await flushTool($)
+  act.timer = null
+  await reportActivity($, { kind: 'stop' })
+}
+
 function stopPolling(mem: Mem) {
   mem.timer?.cancel()
   mem.timer = null
@@ -1532,6 +1574,20 @@ export const register: Register = (on) => {
   on('tool.call', async ($, e, next) => {
     const home = await $.env.get('HOME')
     if (keyGuardReason(e as Record<string, unknown>, home) !== null) return { deny: KEY_REFUSAL }
+    const r = await next(e)
+    // hcp-16: a seated session shows its work live in the app (files inside this folder only).
+    const a = activityOf(e as Record<string, unknown>, sm.cwd)
+    if (a) await reportTool($, a)
+    return r
+  })
+
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) await reportActivity($, { kind: 'start' })
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) await reportStop($)
     return next(e)
   })
 

@@ -26,7 +26,10 @@ workspaces and the band offers **Join as agent**. Joining makes this window one
 of your agents in that workspace (shown in the app as "Running in your Claude
 Code"; it costs no compute). Each window is its own agent; the same folder and
 session come back as the same agent. **Leave**, or closing the session, takes it
-offline. The model is told only its seat (workspace, agent name, the item it
+offline. While joined, the app shows this window working live: the files it
+reads and edits inside this folder (as paths relative to it) and a short cue such
+as "Editing app.ts". Never file contents, command text, or anything outside the
+folder. The model is told only its seat (workspace, agent name, the item it
 claimed), never chat. If the folder's repo belongs to a workspace you are not in,
 the band offers **Request to join**; anywhere else the band stays social (chat,
 people, notifications). Home has **Work here** (join this folder's workspace, or
