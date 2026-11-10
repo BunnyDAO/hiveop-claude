@@ -126,7 +126,7 @@ async function workspaces($: any, surface: 'terminal' | 'desktop') {
   return pane
 }
 
-test('the row button follows where the code is, and every row names who pays', async ($, on) => {
+test('the row button follows where the code is; who pays is said once, behind More', async ($, on) => {
   const w = world(on, { store: new Map<string, unknown>([['clones.byRemote', { 'github.com/acme/kiln': '/elsewhere/kiln-copy' }]]) })
   await start($)
   await w.clock.advance(50)
@@ -141,7 +141,7 @@ test('the row button follows where the code is, and every row names who pays', a
     }
     expect(await text(pane)).not.toContain('ws-open-w-press')
     expect(shown).not.toContain('ws-code-w-press')
-    expect(shown.match(/your Claude plan/gi)?.length).toBe(WSROWS.length)
+    expect(shown).not.toContain('your Claude plan')
     await pane.unmount()
   }
 })

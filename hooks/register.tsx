@@ -1506,8 +1506,21 @@ async function openCloudTerminal($: Engine, wsId: string): Promise<void> {
   if (!(await openInBrowser($, url))) await setCloudNote($, wsId, url)
 }
 
+/** One cloud agent: name and state ("deep" reads as stored). The rate is said once, on the row above. */
 function cloudLine(a: CloudAgent): string {
-  return `${oneLine(a.name, 24)} · ${a.state} · ${a.creditsPerHour} cr/hr`
+  return `${oneLine(a.name, 24)} · ${a.state === 'deep' ? 'stored' : a.state}`
+}
+
+/** The collapsed row's hint: how many cloud agents, and how many awake (what costs credits now). */
+function agentSummary(agents: CloudAgent[]): string {
+  if (agents.length === 0) return ''
+  const awake = agents.filter((a) => a.state === 'awake' || a.state === 'waking').length
+  return ` · ${agents.length} cloud${awake > 0 ? ` · ${awake} awake` : ''}`
+}
+
+/** More / Less: one workspace open at a time. */
+async function toggleRow($: Engine, wsId: string): Promise<void> {
+  await update($, nav, (n) => ({ ...n, open: n.open === wsId ? null : wsId }) as NavView)
 }
 
 const POLL_MS = 3000
@@ -2058,13 +2071,17 @@ export const register: Register = (on) => {
             {nv.tab === 'mine' && nv.mine === null && <Text>Loading…</Text>}
             {nv.tab === 'mine' && nv.mine !== null && nv.mine.length === 0 && <Text>No workspaces yet. Create one at app.hiveop.io.</Text>}
             {nv.tab === 'mine' &&
-              (nv.mine ?? []).slice(0, room).map((w) => (
+              (nv.mine ?? []).slice(0, room).map((w) => {
+                const agents = cl.byWs[w.id] ?? []
+                const opened = nv.open === w.id || cl.request?.wsId === w.id || cl.note?.wsId === w.id
+                const rate = agents.reduce((m, a) => Math.max(m, a.creditsPerHour), 0)
+                return (
                 <Box key={`ws-${w.id}`} flexDirection="column">
                 <Box justifyContent="space-between" gap={2}>
                   <Text wrap="truncate-end">
                     <Text bold>{w.name}</Text>
                     {st.seat?.workspaceId === w.id ? '  joined' : ''}
-                    {' · your Claude plan'}
+                    {agentSummary(agents)}
                   </Text>
                   <Box gap={2}>
                     {(() => {
@@ -2077,32 +2094,36 @@ export const register: Register = (on) => {
                         return <Button key={`ws-get-${w.id}`} label="Get code" variant="primary" onPress={() => void getCode($, w, e.surface === 'terminal')} />
                       return null
                     })()}
-                    <Button key={`ws-chat-${w.id}`} label="Open chat" plain onPress={() => void openRoom($, w)} />
-                    {w.kind !== 'local' && <Button key={`ws-cloud-${w.id}`} label="Run in cloud" plain onPress={() => void runInCloud($, w.id)} />}
-                    {w.kind !== 'local' && <Text>HiveOp credits</Text>}
+                    <Button key={`ws-more-${w.id}`} label={opened ? 'Less' : 'More'} plain onPress={() => void toggleRow($, w.id)} />
                   </Box>
                 </Box>
-                {(cl.byWs[w.id] ?? []).map((a) => (
-                  <Box key={`cloud-row-${a.id}`} paddingLeft={2} gap={2}>
-                    <Text wrap="truncate-end">{cloudLine(a)}</Text>
-                    {(a.state === 'awake' || a.state === 'waking') && <Button key={`cloud-sleep-${a.id}`} label="Sleep" plain onPress={() => void sleepCloud($, w.id, a)} />}
-                    {a.state !== 'awake' && a.state !== 'waking' && <Button key={`cloud-wake-${a.id}`} label="Wake" plain onPress={() => void runInCloud($, w.id, a.id)} />}
-                    <Button key={`cloud-term-${a.id}`} label="Open terminal" plain onPress={() => void openCloudTerminal($, w.id)} />
-                  </Box>
-                ))}
-                {cl.request?.wsId === w.id && (
+                {opened && (
                   <Box paddingLeft={2} flexDirection="column">
-                    <Text bold>Approve in your browser…</Text>
-                    <Text wrap="truncate-end">{cl.request.url}</Text>
-                  </Box>
-                )}
-                {cl.note?.wsId === w.id && (
-                  <Box paddingLeft={2}>
-                    <Text bold>{cl.note.text}</Text>
+                    <Box gap={2}>
+                      <Button key={`ws-chat-${w.id}`} label="Open chat" plain onPress={() => void openRoom($, w)} />
+                      {w.kind !== 'local' && <Button key={`ws-cloud-${w.id}`} label="Run in cloud" plain onPress={() => void runInCloud($, w.id)} />}
+                    </Box>
+                    <Text wrap="truncate-end">{w.kind === 'local' ? 'Your Claude plan' : `Here: your Claude plan · Cloud: ${rate > 0 ? `${rate} cr/hr awake` : 'HiveOp credits'}`}</Text>
+                    {agents.map((a) => (
+                      <Box key={`cloud-row-${a.id}`} gap={2}>
+                        <Text wrap="truncate-end">{cloudLine(a)}</Text>
+                        {(a.state === 'awake' || a.state === 'waking') && <Button key={`cloud-sleep-${a.id}`} label="Sleep" plain onPress={() => void sleepCloud($, w.id, a)} />}
+                        {a.state !== 'awake' && a.state !== 'waking' && <Button key={`cloud-wake-${a.id}`} label="Wake" plain onPress={() => void runInCloud($, w.id, a.id)} />}
+                        <Button key={`cloud-term-${a.id}`} label="Terminal" plain onPress={() => void openCloudTerminal($, w.id)} />
+                      </Box>
+                    ))}
+                    {cl.request?.wsId === w.id && (
+                      <Box flexDirection="column">
+                        <Text bold>Approve in your browser…</Text>
+                        <Text wrap="truncate-end">{cl.request.url}</Text>
+                      </Box>
+                    )}
+                    {cl.note?.wsId === w.id && <Text bold>{cl.note.text}</Text>}
                   </Box>
                 )}
                 </Box>
-              ))}
+                )
+              })}
             {nv.tab === 'invites' && nv.invites === null && <Text>Loading…</Text>}
             {nv.tab === 'invites' && nv.invites !== null && nv.invites.length === 0 && <Text>No invites.</Text>}
             {nv.tab === 'invites' &&

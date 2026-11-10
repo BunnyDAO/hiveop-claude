@@ -5,7 +5,7 @@ const KEY = 'wm_ct_SECRETKEYSECRETKEY'
 const API = 'https://api.test/api/v1'
 const WS = 'ws-1'
 const ME = 'email:user-ada'
-const BAND = { plugin: 'hiveop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns: 120, scroll: { offset: 0, bodyRows: 3 }, view: {} } } as const
+const BAND = { plugin: 'hiveop', component: 'AbovePrompt', props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 3, bodyColumns: 120, scroll: { offset: 0, bodyRows: 3 }, view: {} } } as const
 const PANE = {
   plugin: 'hiveop',
   component: 'Pane',

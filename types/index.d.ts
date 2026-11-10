@@ -65,6 +65,8 @@ export type NavView = {
   invites: InviteRow[] | null
   explore: { search: string; rows: WsRow[]; offset: number; total: number; loaded: boolean }
   people: { query: string; rows: PilotRow[]; following: string[]; offset: number; more: boolean; loaded: boolean }
+  // The one workspace row opened with More (its actions and cloud agents). Pane only.
+  open?: string | null
   // Clones on this computer (hcp-22): normalised git remote → folder. Pane only.
   clones: Record<string, string>
   // hcp-07: the person's swarm channels they may see, once opened. Pane only.

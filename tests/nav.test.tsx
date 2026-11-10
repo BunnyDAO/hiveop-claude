@@ -4,7 +4,7 @@ const HOME = '/home/ada'
 const KEY = 'wm_ct_SECRETKEYSECRETKEY'
 const API = 'https://api.test/api/v1'
 const ME = 'email:user-ada'
-const BAND = { plugin: 'hiveop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns: 80, scroll: { offset: 0, bodyRows: 3 }, view: {} } } as const
+const BAND = { plugin: 'hiveop', component: 'AbovePrompt', props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 3, bodyColumns: 80, scroll: { offset: 0, bodyRows: 3 }, view: {} } } as const
 const PANE = {
   plugin: 'hiveop',
   component: 'Pane',
@@ -155,9 +155,12 @@ test('workspaces: Open chat adds a tab; no Use button, no global current workspa
     const listed = await text(pane)
     expect(listed).not.toContain('ws-use-')
     expect(listed).not.toContain('current')
+    // A row's actions sit behind More (one row open at a time).
+    if (!(await pane.find({ key: 'ws-chat-w1' }))) await pane.press({ key: 'ws-more-w1' })
     expect(await pane.find({ key: 'ws-chat-w1' })).toBeDefined()
     if (surface === 'terminal') {
       const syncStarts = w.calls.filter((c) => c.path.startsWith('/me/sync?clientId=')).length
+      await pane.press({ key: 'ws-more-w2' })
       await pane.press({ key: 'ws-chat-w2' })
       expect(w.calls.some((c) => c.path.startsWith('/workspaces/w2/chat'))).toBe(true)
       expect(w.store.get('chat.tabs')).toEqual([{ id: 'w2', name: 'Anvil' }])

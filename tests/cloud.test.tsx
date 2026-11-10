@@ -90,10 +90,15 @@ function world(on: any, state: Partial<World['state']> = {}): World {
 
 const text = async (ui: any) => JSON.stringify(await ui.drawn())
 const start = async ($: any) => $.session.start({ cwd: '/tmp/x', surface: 'terminal', isInteractive: true })
-async function workspaces($: any, surface: 'terminal' | 'desktop') {
+async function workspaces($: any, surface: 'terminal' | 'desktop', row = 'w-cloud') {
   const pane = await $.ui.mount({ ...PANE, surface })
   if (await pane.find({ key: 'home-workspaces' })) await pane.press({ key: 'home-workspaces' })
+  await openRow(pane, row)
   return pane
+}
+/** A row's actions and cloud agents sit behind More; open `row` if it is not already. */
+async function openRow(pane: any, row: string) {
+  if (!(await pane.find({ key: `ws-chat-${row}` }))) await pane.press({ key: `ws-more-${row}` })
 }
 async function ready(w: World, $: any) {
   await start($)
@@ -102,15 +107,24 @@ async function ready(w: World, $: any) {
 const posts = (w: World) => w.calls.filter((c) => c.method === 'POST' && c.path === '/me/plugin-approvals')
 const agentFetches = (w: World) => w.calls.filter((c) => c.path.endsWith('/cloud-agents')).length
 
-test('every cloud-capable row has Run in cloud, labelled HiveOp credits; local rows do not', async ($, on) => {
+test('rows are one line; More shows Run in cloud and who pays, once; local rows have no Run in cloud', async ($, on) => {
   const w = world(on)
   await ready(w, $)
   for (const surface of SURFACES) {
-    const pane = await workspaces($, surface)
-    expect(await pane.find({ key: 'ws-cloud-w-press' })).toBeDefined()
-    expect(await pane.find({ key: 'ws-cloud-w-cloud' })).toBeDefined()
+    const pane = await $.ui.mount({ ...PANE, surface })
+    if (await pane.find({ key: 'home-workspaces' })) await pane.press({ key: 'home-workspaces' })
+    if (await pane.find({ key: 'ws-chat-w-cloud' })) await pane.press({ key: 'ws-more-w-cloud' })
+    expect(await pane.find({ key: 'ws-cloud-w-cloud' })).toBeUndefined()
+    expect(await text(pane)).not.toContain('your Claude plan')
+    for (const row of ['w-press', 'w-cloud']) {
+      await openRow(pane, row)
+      expect(await pane.find({ key: `ws-cloud-${row}` })).toBeDefined()
+      expect((await text(pane)).match(/your Claude plan/gi)?.length).toBe(1)
+      expect(await text(pane)).toContain('HiveOp credits')
+    }
+    await openRow(pane, 'w-local')
     expect(await pane.find({ key: 'ws-cloud-w-local' })).toBeUndefined()
-    expect(await text(pane)).toContain('HiveOp credits')
+    await pane.press({ key: 'ws-more-w-local' })
     await pane.unmount()
   }
 })
@@ -142,7 +156,7 @@ test('request, pending, approved, then the agent line shows', async ($, on) => {
     expect(after).not.toContain('Approve in your browser…')
     expect(after).toContain('Claude')
     expect(after).toContain('awake')
-    expect(after).toContain('48 cr/hr')
+    expect(after).toContain('48 cr/hr awake')
     expect(await pane.find({ key: 'cloud-sleep-agent-1' })).toBeDefined()
     expect(await pane.find({ key: 'cloud-term-agent-1' })).toBeDefined()
     expect(await pane.find({ key: 'cloud-wake-agent-1' })).toBeUndefined()
