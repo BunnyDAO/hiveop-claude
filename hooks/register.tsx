@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface as Engine, Register } from 'claude-code'
 
-import type { AuthView, ChatMsg, CloudAgent, CloudView, ChatTab, ChatView, InviteRow, NavView, PhotosView, PilotRow, SeatView, WorkView, WsRow } from '../types'
+import type { AlertRow, AuthView, ChatMsg, CloudAgent, CloudView, ChatTab, ChatView, InviteRow, NavView, PhotosView, PilotRow, SeatView, WorkView, WsRow } from '../types'
 import {
   type Fetched,
   acceptInvite,
@@ -552,6 +552,7 @@ async function syncOnce($: Engine, mem: ChatMem): Promise<number> {
   const events = Array.isArray(r.body?.events) ? (r.body!.events as Array<Record<string, unknown>>) : []
   const v = await read($, chat)
   await onWorkEvents($, events, v.me)
+  await onAlertEvents($, events)
   const incoming: ChatMsg[] = []
   const elsewhere = new Map<string, number>()
   for (const ev of events) {
@@ -580,6 +581,56 @@ async function syncOnce($: Engine, mem: ChatMem): Promise<number> {
     } as ChatView
   })
   return 0
+}
+
+// ── hcp-09: notifications (mentions first) ──
+// From sync: a toast and one desktop notice per new unread notification; the band
+// counts them; opening the list marks them all read (the app sees the same state).
+
+const MAX_NOTICES = 3
+const seenAlerts = new Set<string>()
+
+async function setAlerts($: Engine, patch: Partial<NonNullable<NavView['alerts']>>): Promise<void> {
+  await update($, nav, (n) => ({ ...n, alerts: { count: 0, rows: null, ...n.alerts, ...patch } }) as NavView)
+}
+
+async function loadAlertCount($: Engine): Promise<void> {
+  const r = await hiveop($, '/me/notifications/count')
+  const n = r && r.ok && typeof r.body?.count === 'number' ? Math.max(0, Math.floor(r.body.count)) : 0
+  await setAlerts($, { count: n })
+}
+
+function toAlert(raw: unknown): (AlertRow & { read: boolean }) | null {
+  const n = raw as Record<string, unknown> | null
+  if (!n || !str(n.id)) return null
+  return { id: str(n.id), title: oneLine(str(n.title) || 'Notification', 120), body: oneLine(str(n.body), 160), at: Date.parse(str(n.createdAt)) || 0, read: n.read === true }
+}
+
+async function onAlertEvents($: Engine, events: Array<Record<string, unknown>>): Promise<void> {
+  const fresh: AlertRow[] = []
+  for (const ev of events) {
+    if (ev.type !== 'notification:created') continue
+    const a = toAlert(ev.notification)
+    if (!a || a.read || seenAlerts.has(a.id)) continue
+    seenAlerts.add(a.id)
+    fresh.push(a)
+  }
+  if (fresh.length === 0) return
+  await update($, nav, (n) => ({ ...n, alerts: { count: (n.alerts?.count ?? 0) + fresh.length, rows: null } }) as NavView)
+  for (const a of fresh.slice(0, MAX_NOTICES)) {
+    $.ui.toast(`HiveOp · ${a.title}`)
+    await $.ui.notify(a.body ? `${a.title}: ${a.body}` : a.title, { title: 'HiveOp' }).catch(() => undefined)
+  }
+}
+
+/** Opens the list and marks everything read on HiveOp. */
+async function openAlerts($: Engine): Promise<void> {
+  await goTo($, 'alerts')
+  const r = await hiveop($, '/me/notifications')
+  const list = r && r.ok && Array.isArray(r.body?.notifications) ? (r.body!.notifications as unknown[]) : []
+  const rows = list.map(toAlert).filter((a): a is AlertRow & { read: boolean } => a !== null).slice(0, 20)
+  await setAlerts($, { rows, count: 0 })
+  await hiveop($, '/me/notifications/read-all', { method: 'POST', body: {} })
 }
 
 // ── work band and Claim next (hcp-11) ──
@@ -1544,6 +1595,7 @@ async function finishSignedIn($: Engine, mem: Mem) {
   await update($, auth, () => ({ phase: 'signed-in', name: me.state === 'ok' ? me.name : null }) as AuthView)
   await update($, chat, (c) => ({ ...c, me: me.state === 'ok' ? me.wallet : c.me }))
   await loadBlocks($)
+  await loadAlertCount($)
   await restoreTabs($)
   startChat($, mem.chat)
   startCloudSlow($)
@@ -1612,6 +1664,7 @@ async function signIn($: Engine, mem: Mem): Promise<AuthView> {
 async function signOut($: Engine, mem: Mem) {
   stopGate(mem)
   hiddenWallets.clear()
+  seenAlerts.clear()
   await leaveSeat($)
   await update($, seat, (v) => ({ ...EMPTY_SEAT, auto: v.auto }) as SeatView)
   stopPolling(mem)
@@ -1843,6 +1896,9 @@ export const register: Register = (on) => {
             <Button key="band-request" label="Request to join" plain hotkey={hot()} onPress={() => void requestSeatAccess($)} />
           )}
           {signedIn && <Button key="band-chat" label="Chat" plain hotkey={hot()} onPress={() => void showChat($)} />}
+          {signedIn && (nv.alerts?.count ?? 0) > 0 && (
+            <Button key="band-alerts" label={`Alerts · ${nv.alerts!.count}`} plain hotkey={hot()} onPress={() => void openAlertsPane($)} />
+          )}
           {signedIn && st.seat && <Button key="band-leave" label="Leave" plain hotkey={hot()} onPress={() => void leaveSeat($)} />}
           {signedIn && st.seat && wk.loaded && wk.ready > 0 && (
             <Button key="band-claim" label={wk.claiming ? 'Claiming…' : 'Claim'} plain hotkey={hot()} onPress={() => void claimNext($)} />
@@ -1983,6 +2039,32 @@ export const register: Register = (on) => {
                 {ex.offset + ex.rows.length < ex.total && <Button key="ex-next" label="Next" plain onPress={() => void loadExplore($, ex.search, ex.offset + PAGE)} />}
               </Box>
             )}
+          </Box>
+        </Box>
+      )
+    }
+    if (v.phase === 'signed-in' && c.screen !== 'chat' && nv.screen === 'alerts') {
+      const rowsA = nv.alerts?.rows
+      return (
+        <Box flexDirection="column">
+          {paneHead(ui, seatText)}
+          <Box paddingX={1} gap={2}>
+            <Text bold color={BRAND}>Alerts</Text>
+            <Box flexGrow={1} />
+            <Button key="nav-back" label="Back" plain onPress={() => void goTo($, 'home')} />
+          </Box>
+          {paneRule(ui, cols)}
+          <Box flexDirection="column" paddingX={1}>
+            {rowsA === null || rowsA === undefined ? <Text>Loading…</Text> : rowsA.length === 0 ? <Text>No notifications.</Text> : null}
+            {(rowsA ?? []).slice(0, room).map((a) => (
+              <Box key={`alert-${a.id}`} flexDirection="column">
+                <Box justifyContent="space-between" gap={2}>
+                  <Text bold>{a.title}</Text>
+                  <Text>{a.at ? timeOf(a.at) : ''}</Text>
+                </Box>
+                {a.body !== '' && <Text>{a.body}</Text>}
+              </Box>
+            ))}
           </Box>
         </Box>
       )
@@ -2189,6 +2271,7 @@ export const register: Register = (on) => {
           <Box flexDirection="column">
             <Box gap={2}>
               <Button key="open-chat" label={unreadTotal(c) > 0 ? `Chat · ${unreadTotal(c)} new` : 'Chat'} variant="primary" onPress={() => void showChat($)} />
+              <Button key="home-alerts" plain label={(nv.alerts?.count ?? 0) > 0 ? `Alerts · ${nv.alerts!.count}` : 'Alerts'} onPress={() => void openAlerts($)} />
               <Button key="home-work" plain label={st.busy ? 'Joining…' : 'Work here'} onPress={() => void workHere($)} />
               <Button key="home-claim" plain label={wk.claiming ? 'Claiming…' : 'Claim next'} onPress={() => void claimNext($)} />
             </Box>
@@ -2248,6 +2331,15 @@ function sayText(out: SendOutcome, c: ChatView): string {
 }
 
 // The band's and home's Chat button: into the pane if it can be drawn, else notices.
+/** hcp-09: the band's Alerts opens the pane on the list (narrow windows get it as notices). */
+async function openAlertsPane($: Engine): Promise<void> {
+  const opened = await $.ui.open({ id: PANE, title: 'HiveOp' })
+  await openAlerts($)
+  if (!opened.isPlaced) {
+    for (const a of ((await read($, nav)).alerts?.rows ?? []).slice(0, 5)) $.ui.log(`HiveOp · ${a.title}${a.body ? ` — ${a.body}` : ''}`)
+  }
+}
+
 async function showChat($: Engine) {
   const opened = await $.ui.open({ id: PANE, title: 'HiveOp' })
   await ensureLoaded($)

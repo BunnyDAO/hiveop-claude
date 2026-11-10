@@ -19,6 +19,13 @@ with a Claim button. Home has Claim next (it takes the top ready item as you, an
 says the server's reason if you already hold one). Toasts tell you when work is
 new, claimed or done.
 
+## Mentions and alerts
+
+Write `@Name` in workspace chat to notify a member. When someone mentions you (or
+HiveOp has another notification for you), you get a toast and one desktop
+notification, through your Claude Code notification setting. The band shows
+**Alerts · N**; opening the list marks them read, in the app too.
+
 ## Message actions
 
 Each message from someone else has **⋯**: Reply (quotes it into your message),

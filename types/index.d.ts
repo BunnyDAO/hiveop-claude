@@ -53,7 +53,7 @@ export type PilotRow = { wallet: string; name: string }
 
 /** Home, workspaces and people: what the pane draws besides the chat. Names here are other people's: pane only. */
 export type NavView = {
-  screen: 'home' | 'workspaces' | 'people'
+  screen: 'home' | 'workspaces' | 'people' | 'alerts'
   tab: 'mine' | 'invites' | 'explore'
   // The band above the prompt: person's choice, kept across sessions.
   band: 'shown' | 'hidden'
@@ -65,7 +65,12 @@ export type NavView = {
   people: { query: string; rows: PilotRow[]; following: string[]; offset: number; more: boolean; loaded: boolean }
   // Clones on this computer (hcp-22): normalised git remote → folder. Pane only.
   clones: Record<string, string>
+  // hcp-09: notifications (mentions and the rest): unread count, and the list once opened. Pane, band and toasts only.
+  alerts?: { count: number; rows: AlertRow[] | null }
 }
+
+/** One notification as the pane lists it. Other people's words: never in command output. */
+export type AlertRow = { id: string; title: string; body: string; at: number }
 
 /** The work band: the seat workspace's ready queue. Titles are other people's words: band, pane and toasts only. */
 export type WorkView = {
