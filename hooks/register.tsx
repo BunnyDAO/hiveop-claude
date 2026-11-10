@@ -1388,6 +1388,8 @@ async function signOut($: Engine, mem: Mem) {
   stopChat(mem.chat)
   stopCloud()
   await update($, cloud, () => EMPTY_CLOUD)
+  // hcp-14: HiveOp revokes this key too, so a copy left anywhere stops working. Best effort: offline still signs out.
+  await hiveop($, '/me/plugin-key', { method: 'DELETE' })
   await forgetKey($)
   await update($, auth, () => ({ phase: 'signed-out' }) as AuthView)
   await update($, chat, () => EMPTY_CHAT)

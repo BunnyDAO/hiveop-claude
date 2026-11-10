@@ -210,10 +210,25 @@ test('a stored key restores the signed-in band; sign out forgets it and nothing 
   const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await text(pane)).toContain('Ada')
   await pane.press({ key: 'sign-out' })
+  // hcp-14: the server revokes this key, with the key, before the file goes.
+  const revoke = w.calls.find((c) => c.url.endsWith('/me/plugin-key') && c.method === 'DELETE')
+  expect(revoke?.headers.Authorization ?? revoke?.headers.authorization).toBe(`Bearer ${KEY}`)
   expect(w.ran.some((a) => a[0] === 'rm' && a.some((x) => x.endsWith('claude-plugin.json')))).toBe(true)
   expect(await text(pane)).toContain('Sign in')
   await w.clock.advance(60_000)
   expect(w.calls.filter((c) => c.url.endsWith('/pairing/poll'))).toHaveLength(0)
+  await pane.unmount()
+})
+
+test('sign out still forgets the key when HiveOp is unreachable', async ($, on) => {
+  const w = world(on, { files: new Map([[`${HOME}/.hiveop/claude-plugin.json`, JSON.stringify({ key: KEY })]]) })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await text(pane)).toContain('Ada')
+  w.offline = true
+  await pane.press({ key: 'sign-out' })
+  expect(w.ran.some((a) => a[0] === 'rm' && a.some((x) => x.endsWith('claude-plugin.json')))).toBe(true)
+  expect(await text(pane)).toContain('Sign in')
   await pane.unmount()
 })
 
