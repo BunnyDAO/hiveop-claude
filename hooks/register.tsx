@@ -1511,6 +1511,13 @@ function cloudLine(a: CloudAgent): string {
   return `${oneLine(a.name, 24)} · ${a.state === 'deep' ? 'stored' : a.state}`
 }
 
+/** Who pays in the cloud, and whether the box is up now: "awake · 48 cr/hr" vs "asleep · 48 cr/hr when awake". */
+function cloudCost(agents: CloudAgent[], rate: number): string {
+  if (rate <= 0) return 'Cloud: HiveOp credits'
+  const up = agents.some((a) => a.state === 'awake' || a.state === 'waking')
+  return up ? `Cloud: awake · ${rate} cr/hr` : `Cloud: asleep · ${rate} cr/hr when awake`
+}
+
 /** The collapsed row's hint: how many cloud agents, and how many awake (what costs credits now). */
 function agentSummary(agents: CloudAgent[]): string {
   if (agents.length === 0) return ''
@@ -2103,7 +2110,7 @@ export const register: Register = (on) => {
                       <Button key={`ws-chat-${w.id}`} label="Open chat" plain onPress={() => void openRoom($, w)} />
                       {w.kind !== 'local' && <Button key={`ws-cloud-${w.id}`} label="Run in cloud" plain onPress={() => void runInCloud($, w.id)} />}
                     </Box>
-                    <Text wrap="truncate-end">{w.kind === 'local' ? 'Your Claude plan' : `Here: your Claude plan · Cloud: ${rate > 0 ? `${rate} cr/hr awake` : 'HiveOp credits'}`}</Text>
+                    <Text wrap="truncate-end">{w.kind === 'local' ? 'Your Claude plan' : `Here: your Claude plan · ${cloudCost(agents, rate)}`}</Text>
                     {agents.map((a) => (
                       <Box key={`cloud-row-${a.id}`} gap={2}>
                         <Text wrap="truncate-end">{cloudLine(a)}</Text>
