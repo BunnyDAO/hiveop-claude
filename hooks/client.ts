@@ -7,7 +7,7 @@ import type { CloudAgent, InviteRow, PilotRow, WsRow } from '../types'
 // Nothing here returns, logs or throws the key.
 
 export const CLIENT_KIND = 'claude-code-plugin'
-export const CLIENT_VERSION = '0.1.0'
+export const CLIENT_VERSION = '0.2.0'
 const DEFAULT_API = 'https://api.wenrwa.com/api/v1'
 const APPROVAL_PAGE = 'https://app.hiveop.io/claude-code'
 
@@ -154,6 +154,45 @@ function retryAfter(h: Record<string, string> | undefined): number | null {
   return null
 }
 
+// ── hcp-02: the client gate ──
+
+/** HiveOp refuses this version (too old) or has paused the plugin. */
+export type Gate = { why: 'update' | 'paused'; message: string | null }
+
+/** The gate refusal in a keyed reply, if it is one. */
+export function gateOf(status: number, body: Record<string, unknown> | null): Gate | null {
+  const err = body?.error as { code?: unknown; message?: unknown } | undefined
+  const message = typeof err?.message === 'string' && err.message.trim() ? err.message.trim().slice(0, 140) : null
+  if (status === 426 && err?.code === 'CLIENT_UPDATE_REQUIRED') return { why: 'update', message }
+  if (status === 503 && err?.code === 'CLIENT_PAUSED') return { why: 'paused', message }
+  return null
+}
+
+// A gate refusal seen on any keyed reply, until the plugin's loop takes it.
+let pendingGate: Gate | null = null
+/** The latest gate refusal from a keyed reply, once. */
+export function takeGate(): Gate | null {
+  const g = pendingGate
+  pendingGate = null
+  return g
+}
+
+/** Asks HiveOp (no key) whether this version may run. null = yes or unreachable (fail open). */
+export async function checkGate($: Engine): Promise<Gate | null> {
+  try {
+    const q = `kind=${encodeURIComponent(CLIENT_KIND)}&version=${encodeURIComponent(CLIENT_VERSION)}`
+    const res = await $.http.fetch(`${await apiBase($)}/client-gate?${q}`, { method: 'GET', headers: headers() })
+    const body = parse(res.text)
+    if (!res.ok || !body) return null
+    const message = typeof body.message === 'string' && body.message.trim() ? body.message.trim().slice(0, 140) : null
+    if (body.state === 'update') return { why: 'update', message }
+    if (body.state === 'off') return { why: 'paused', message }
+    return null
+  } catch {
+    return null
+  }
+}
+
 export async function hiveop($: Engine, path: string, init: { method?: string; body?: unknown } = {}): Promise<Fetched | null> {
   const key = await loadKey($)
   if (!key) return null
@@ -163,7 +202,10 @@ export async function hiveop($: Engine, path: string, init: { method?: string; b
       headers: headers(key),
       body: init.body === undefined ? undefined : JSON.stringify(init.body),
     })
-    return { ok: res.ok, status: res.status, body: parse(res.text), retryAfterSec: retryAfter(res.headers) }
+    const body = parse(res.text)
+    const gate = gateOf(res.status, body)
+    if (gate) pendingGate = gate
+    return { ok: res.ok, status: res.status, body, retryAfterSec: retryAfter(res.headers) }
   } catch {
     return { ok: false, status: 0, body: null, retryAfterSec: null }
   }

@@ -15,6 +15,7 @@ import {
   fileCloudRun,
   fetchMe,
   fileRepoAccess,
+  checkGate,
   folderKey,
   fetchAvatar,
   followingAmong,
@@ -28,6 +29,7 @@ import {
   listInvites,
   listMine,
   listPilots,
+  takeGate,
   loadKey,
   matchWorkspaces,
   openInBrowser,
@@ -42,6 +44,7 @@ import {
   startPairing,
   workspaceUrl,
 } from './client'
+import type { Gate } from './client'
 import { LOGO_PNG } from './logo'
 import { KEY_REFUSAL, keyGuardReason } from './keyguard'
 import { chooseCloneFolder, cloneRepo, cloneableUrl, helperValue, httpsOrigin, inlinePluginDir, pinHelper, normRemote, openFolder, rememberClone, scanClones, takeJoinOnOpen, writeJoinOnOpen } from './launch'
@@ -446,6 +449,12 @@ async function step($: Engine, mem: ChatMem, gen: number): Promise<void> {
     delay = backoff(mem)
   } finally {
     mem.inflight = false
+  }
+  // hcp-02: a keyed reply said "update" or "paused": go quiet.
+  const gate = takeGate()
+  if (gate && topMem) {
+    await enterGate($, topMem, gate)
+    return
   }
   if (!mem.running || mem.gen !== gen) return
   const spent = (await $.clock.now()) - started
@@ -1295,7 +1304,49 @@ const MAX_POLL_FAILURES = 5
 
 type Cancel = { cancel: () => void }
 // Module variables start over on a reload; session.start resets the view to match.
-type Mem = { timer: Cancel | null; pollToken: string | null; failures: number; expiresAtMs: number; chat: ChatMem }
+type Mem = { timer: Cancel | null; pollToken: string | null; failures: number; expiresAtMs: number; chat: ChatMem; gateTimer: Cancel | null }
+
+// hcp-02: how often a gated plugin asks HiveOp again (one cheap keyless request).
+const GATE_RECHECK_MS = 15 * 60_000
+// The register's Mem, for the chat loop to put the plugin in the gated state.
+let topMem: Mem | null = null
+const UPDATE_COMMAND = 'claude plugin update hiveop'
+
+function gateText(v: Extract<AuthView, { phase: 'gated' }>): string {
+  if (v.why === 'update') return 'Please update HiveOp.'
+  return v.message ?? 'HiveOp for Claude Code is paused.'
+}
+
+/** The client gate refused: go quiet (no polling), keep the key, ask again later. */
+async function enterGate($: Engine, mem: Mem, g: Gate): Promise<void> {
+  stopPolling(mem)
+  stopChat(mem.chat)
+  stopCloud()
+  await update($, auth, () => ({ phase: 'gated', why: g.why, message: g.message }) as AuthView)
+  if (!mem.gateTimer) {
+    mem.gateTimer = $.clock.every(GATE_RECHECK_MS, () => {
+      void recheckGate($, mem)
+    })
+  }
+}
+
+function stopGate(mem: Mem): void {
+  mem.gateTimer?.cancel()
+  mem.gateTimer = null
+}
+
+/** Asks again; when HiveOp lets this version run, signs back in with the kept key. */
+async function recheckGate($: Engine, mem: Mem): Promise<void> {
+  if ((await read($, auth)).phase !== 'gated') return stopGate(mem)
+  const g = await checkGate($)
+  if (g) {
+    await update($, auth, () => ({ phase: 'gated', why: g.why, message: g.message }) as AuthView)
+    return
+  }
+  stopGate(mem)
+  takeGate()
+  await restore($, mem)
+}
 
 const ENDED_TEXT: Record<Extract<AuthView, { phase: 'ended' }>['reason'], string> = {
   denied: 'Sign-in was denied.',
@@ -1365,6 +1416,11 @@ async function tick($: Engine, mem: Mem) {
 
 async function signIn($: Engine, mem: Mem): Promise<AuthView> {
   stopPolling(mem)
+  const g = await checkGate($)
+  if (g) {
+    await enterGate($, mem, g)
+    return read($, auth)
+  }
   const pairing = await startPairing($, await computerName($))
   if (!pairing) {
     const view: AuthView = { phase: 'ended', reason: 'unreachable' }
@@ -1382,6 +1438,7 @@ async function signIn($: Engine, mem: Mem): Promise<AuthView> {
 }
 
 async function signOut($: Engine, mem: Mem) {
+  stopGate(mem)
   await leaveSeat($)
   await update($, seat, (v) => ({ ...EMPTY_SEAT, auto: v.auto }) as SeatView)
   stopPolling(mem)
@@ -1401,6 +1458,8 @@ async function signOut($: Engine, mem: Mem) {
 async function restore($: Engine, mem: Mem) {
   stopPolling(mem)
   if (await loadKey($)) {
+    const g = await checkGate($)
+    if (g) return enterGate($, mem, g)
     await update($, auth, () => ({ phase: 'signed-in', name: null }) as AuthView)
     await finishSignedIn($, mem)
   } else {
@@ -1419,6 +1478,8 @@ function bandText(v: AuthView): string {
       return `  ${v.name ?? 'you'}`
     case 'ended':
       return `  ${ENDED_TEXT[v.reason]}`
+    case 'gated':
+      return `  ${gateText(v)}`
   }
 }
 
@@ -1444,7 +1505,8 @@ function paneRule(ui: Ui, cols: number) {
 }
 
 export const register: Register = (on) => {
-  const mem: Mem = { timer: null, pollToken: null, failures: 0, expiresAtMs: 0, chat: newChatMem() }
+  const mem: Mem = { timer: null, pollToken: null, failures: 0, expiresAtMs: 0, chat: newChatMem(), gateTimer: null }
+  topMem = mem
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'hiveop', description: 'HiveOp: sign in, chat, your account in Claude Code' })
@@ -1925,6 +1987,17 @@ export const register: Register = (on) => {
             {nv.band === 'hidden' && <Button key="home-show-band" plain label="Show band" onPress={() => void setBand($, 'shown')} />}
           </Box>
         )}
+        {v.phase === 'gated' && (
+          <Box flexDirection="column">
+            <Text color="yellow">{gateText(v)}</Text>
+            {v.why === 'update' && <Text>{`Run: ${UPDATE_COMMAND}`}</Text>}
+            {v.why === 'update' && v.message && <Text>{v.message}</Text>}
+            <Box gap={2}>
+              <Button key="gate-check" label="Check again" plain onPress={() => void recheckGate($, mem)} />
+              <Button key="sign-out" plain label="Sign out" onPress={() => void signOut($, mem)} />
+            </Box>
+          </Box>
+        )}
         {v.phase === 'ended' && (
           <Box flexDirection="column">
             <Text color="yellow">{ENDED_TEXT[v.reason]}</Text>
@@ -1969,6 +2042,7 @@ async function signInIfAsked($: Engine, mem: Mem, view: AuthView, sub: string): 
 
 async function narrow($: Engine, mem: Mem, view: AuthView): Promise<string> {
   if (view.phase === 'pairing') return `HiveOp code ${view.code}. Approve at ${view.link}`
+  if (view.phase === 'gated') return view.why === 'update' ? `Please update HiveOp: ${UPDATE_COMMAND}` : gateText(view)
   if (view.phase === 'signed-in') {
     for (;;) {
       const nv = await read($, nav)
@@ -2010,5 +2084,6 @@ async function narrow($: Engine, mem: Mem, view: AuthView): Promise<string> {
   )
   if (pick !== 'Sign in') return 'HiveOp: not signed in.'
   const v = await signIn($, mem)
+  if (v.phase === 'gated') return v.why === 'update' ? `Please update HiveOp: ${UPDATE_COMMAND}` : gateText(v)
   return v.phase === 'pairing' ? `HiveOp code ${v.code}. Approve at ${v.link}` : ENDED_TEXT[v.phase === 'ended' ? v.reason : 'unreachable']
 }

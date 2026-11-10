@@ -5,6 +5,8 @@ export type AuthView =
   | { phase: 'signed-in'; name: string | null }
   // Why sign-in ended without a key.
   | { phase: 'ended'; reason: 'denied' | 'expired' | 'not-open' | 'unreachable' | 'rejected' }
+  // hcp-02: HiveOp's client gate says this version is too old, or the plugin is paused. The key is kept.
+  | { phase: 'gated'; why: 'update' | 'paused'; message: string | null }
 
 /** One chat line as the pane draws it. */
 // `mine`: sent by the signed-in person themselves (not by one of their agents).

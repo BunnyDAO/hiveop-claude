@@ -48,3 +48,10 @@ workspaces and ends when the key is revoked or you sign out. Helper tests:
 ## Key guard
 
 The session's own tools are refused when they try to read the sign-in key (`~/.hiveop`, the helper, `git credential fill`). Best effort; see `docs/security.md` for the storage decision and the gaps.
+
+## Updates and pauses
+
+HiveOp can ask for a newer plugin, or pause the plugin. The band then says
+**Please update HiveOp** (run `claude plugin update hiveop`) or that it is paused,
+and the plugin stops asking HiveOp for anything until it's allowed again. It
+checks back every 15 minutes, or when you press **Check again**. Your sign-in is kept.

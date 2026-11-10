@@ -271,13 +271,15 @@ test('people: search, follow state, follow and unfollow; not yourself', async ($
   }
 })
 
-test('every request carries the plugin key', async ($, on) => {
+test('every request carries the plugin key (except the keyless client-gate check)', async ($, on) => {
   const w = world(on)
   await start($)
   const pane = await open($, 'terminal')
   await pane.press({ key: 'home-people' })
-  expect(w.calls.length).toBeGreaterThan(0)
-  expect(w.calls.every((c) => c.auth === `Bearer ${KEY}`)).toBe(true)
+  const keyed = w.calls.filter((c) => !c.path.includes('/client-gate'))
+  expect(keyed.length).toBeGreaterThan(0)
+  expect(keyed.every((c) => c.auth === `Bearer ${KEY}`)).toBe(true)
+  expect(w.calls.filter((c) => c.path.includes('/client-gate')).every((c) => !c.auth)).toBe(true)
   await pane.unmount()
 })
 
