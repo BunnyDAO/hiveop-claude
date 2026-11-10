@@ -69,6 +69,8 @@ export type NavView = {
   open?: string | null
   // Clones on this computer (hcp-22): normalised git remote → folder. Pane only.
   clones: Record<string, string>
+  // Local workspaces with a folder on this computer (the bridge's map): workspace id → folder. Pane only.
+  localDirs?: Record<string, string>
   // hcp-07: the person's swarm channels they may see, once opened. Pane only.
   swarm?: { rows: Array<{ swarmId: string; swarmName: string; channelId: string; name: string }> | null }
   // hcp-09: notifications (mentions and the rest): unread count, and the list once opened. Pane, band and toasts only.

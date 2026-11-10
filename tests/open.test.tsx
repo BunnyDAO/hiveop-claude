@@ -24,7 +24,14 @@ const REPOS: Record<string, string> = {
   kiln: 'https://github.com/acme/kiln',
   press: 'https://github.com/acme/press',
 }
-const WSROWS = Object.keys(REPOS).map((n) => ({ id: `w-${n}`, name: n[0]!.toUpperCase() + n.slice(1), kind: 'github', githubRepoUrl: REPOS[n] }))
+const WSROWS = [
+  ...Object.keys(REPOS).map((n) => ({ id: `w-${n}`, name: n[0]!.toUpperCase() + n.slice(1), kind: 'github', githubRepoUrl: REPOS[n] })),
+  // Local workspaces: Den has a folder on this computer (the bridge's map), Shed does not.
+  { id: 'w-den', name: 'Den', kind: 'local' },
+  { id: 'w-shed', name: 'Shed', kind: 'local' },
+]
+const DEN = '/home/ada/code/den'
+const LOCAL_MAP = `${HOME}/.wen-market/local-workspaces.json`
 
 type World = {
   clock: ReturnType<typeof mock.clock>
@@ -39,6 +46,7 @@ type World = {
   posts: { path: string }[]
   matchTo: Record<string, { id: string; name: string }>
   paneOpens: number
+  localMap: string | null
 }
 
 function world(on: any, start: Partial<World> = {}): World {
@@ -64,6 +72,7 @@ function world(on: any, start: Partial<World> = {}): World {
     posts: [],
     matchTo: { 'github.com/acme/forge': { id: 'w-forge', name: 'Forge' } },
     paneOpens: 0,
+    localMap: JSON.stringify({ v: 1, entries: { [`${DEN}/`]: { workspaceId: 'w-den', name: 'Den', addedAt: '2026-08-12T00:00:00.000Z' } } }),
     ...start,
   }
   mock.env(on, { HOME, HIVEOP_API_URL: API, TERM_PROGRAM: w.term })
@@ -88,7 +97,13 @@ function world(on: any, start: Partial<World> = {}): World {
     if (!names) throw new Error('ENOENT')
     return { value: names.map((name) => ({ name, kind: 'dir', size: 0, mtimeMs: 0 })) }
   })
-  on('fs.read', () => ({ value: JSON.stringify({ key: KEY }) }))
+  on('fs.read', (_: unknown, e: any) => {
+    if (e.path === LOCAL_MAP) {
+      if (w.localMap === null) throw new Error('ENOENT')
+      return { value: w.localMap }
+    }
+    return { value: JSON.stringify({ key: KEY }) }
+  })
   on('store.get', (_: unknown, e: any) => ({ value: w.store.get(e.key) }))
   on('store.set', (_: unknown, e: any) => {
     w.store.set(e.key, e.value)
@@ -272,6 +287,55 @@ test('an expired join-on-open note does not join, and is still removed', async (
   expect(adopts(w)).toHaveLength(0)
   expect((w.store.get('join.open') as Record<string, unknown>)[folderKey(CWD)]).toBeUndefined()
   expect(w.paneOpens).toBe(0)
+})
+
+test('the workspace name opens its chat', async ($, on) => {
+  world(on)
+  await start($)
+  const pane = await workspaces($, 'terminal')
+  await pane.press({ key: 'ws-name-w-press' })
+  expect(await pane.find({ key: 'chat-close-w-press' })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a local workspace with a folder on this computer offers Open there; one without offers nothing', async ($, on) => {
+  const w = world(on)
+  await start($)
+  await w.clock.advance(50)
+  const pane = await workspaces($, 'terminal')
+  await w.clock.advance(50)
+  expect(await pane.find({ key: 'ws-open-w-shed' })).toBeUndefined()
+  await pane.press({ key: 'ws-open-w-den' })
+  await w.clock.advance(50)
+  expect(launches(w).at(-1)!.join(' ')).toContain(DEN)
+  const rec = Object.values(w.store.get('join.open') as Record<string, { ws: string }>)
+  expect(rec.map((r) => r.ws)).toContain('w-den')
+  await pane.unmount()
+})
+
+test('no bridge map: local workspaces offer no Open', async ($, on) => {
+  const w = world(on, { localMap: null })
+  await start($)
+  await w.clock.advance(50)
+  const pane = await workspaces($, 'terminal')
+  await w.clock.advance(50)
+  expect(await pane.find({ key: 'ws-open-w-den' })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('a session in a local workspace folder (no git remote) is that workspace: Work here', async ($, on) => {
+  const w = world(on)
+  await start($, `${DEN}/src`)
+  await w.clock.advance(50)
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const shown = await text(pane)
+  expect(shown).toContain('Den')
+  expect(await pane.find({ key: 'home-work' })).toBeDefined()
+  expect(shown).not.toContain('Not a workspace folder')
+  await pane.press({ key: 'home-work' })
+  await w.clock.advance(50)
+  expect(adopts(w)).toHaveLength(1)
+  await pane.unmount()
 })
 
 test('remotes normalise across ssh and https', () => {

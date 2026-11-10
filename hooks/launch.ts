@@ -309,3 +309,38 @@ export async function cloneRepo($: Engine, repoUrl: string, dir: string, onPerce
     return { ok: false, reason: 'Clone failed.' }
   }
 }
+
+/**
+ * Local workspaces on this computer: the HiveOp bridge's own map
+ * (~/.wen-market/local-workspaces.json, folder → workspace). Workspace id → folder.
+ * Missing, unreadable or unknown-shaped file: none. Paths stay on this machine.
+ */
+export async function readLocalFolders($: Engine, home: string): Promise<Record<string, string>> {
+  if (!home) return {}
+  let raw: unknown
+  try {
+    raw = JSON.parse(String(await $.fs.read(`${home}/.wen-market/local-workspaces.json`)))
+  } catch {
+    return {}
+  }
+  const r = raw as { v?: unknown; entries?: unknown }
+  if (!r || r.v !== 1 || !r.entries || typeof r.entries !== 'object' || Array.isArray(r.entries)) return {}
+  const out: Record<string, string> = {}
+  for (const [folder, e] of Object.entries(r.entries as Record<string, unknown>)) {
+    const id = (e as { workspaceId?: unknown } | null)?.workspaceId
+    const dir = folder.replace(/\/+$/, '')
+    if (typeof id !== 'string' || !id || !dir.startsWith('/') || hasControl(dir) || hasControl(id)) continue
+    out[id] = dir
+  }
+  return out
+}
+
+/** The local workspace whose folder holds `cwd` (deepest folder wins); null when none. */
+export function localWorkspaceAt(folders: Record<string, string>, cwd: string): string | null {
+  const here = cwd.replace(/\/+$/, '')
+  let best: { id: string; len: number } | null = null
+  for (const [id, dir] of Object.entries(folders)) {
+    if ((here === dir || here.startsWith(`${dir}/`)) && (!best || dir.length > best.len)) best = { id, len: dir.length }
+  }
+  return best?.id ?? null
+}

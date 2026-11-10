@@ -52,7 +52,7 @@ import { LOGO_PNG } from './logo'
 import { activityOf, mergeActivity } from './activity'
 import type { ToolActivity } from './activity'
 import { KEY_REFUSAL, keyGuardReason } from './keyguard'
-import { chooseCloneFolder, cloneRepo, cloneableUrl, helperValue, httpsOrigin, inlinePluginDir, pinHelper, normRemote, openFolder, rememberClone, scanClones, takeJoinOnOpen, writeJoinOnOpen } from './launch'
+import { chooseCloneFolder, cloneRepo, cloneableUrl, helperValue, httpsOrigin, inlinePluginDir, pinHelper, normRemote, openFolder, rememberClone, scanClones, takeJoinOnOpen, writeJoinOnOpen, readLocalFolders, localWorkspaceAt } from './launch'
 
 const EMPTY_CHAT: ChatView = {
   workspace: null,
@@ -924,7 +924,7 @@ async function loadMine($: Engine): Promise<void> {
   await refreshCloudVisible($, out.rows)
   try {
     const home = (await $.env.get('HOME')) ?? ''
-    await setNav($, { clones: await scanClones($, sm.cwd, home) })
+    await setNav($, { clones: await scanClones($, sm.cwd, home), localDirs: await readLocalFolders($, home) })
   } catch {
     // No clones known: rows simply offer no Open.
   }
@@ -1272,6 +1272,16 @@ function seatText(v: NonNullable<SeatView['seat']>): string {
   return `HiveOp seat: this session is the agent "${oneLinePrompt(v.name, 40)}" in the HiveOp workspace "${ws}" (id ${v.workspaceId}).${claimed} Work tools (credited to this agent, this workspace only): mcp__hiveop__next_work, mcp__hiveop__claim_work, mcp__hiveop__finish_work.`
 }
 
+/** A local workspace whose folder (per the bridge's map) holds this session's folder, named from the person's own list. */
+async function localHere($: Engine): Promise<{ id: string; name: string } | null> {
+  const home = (await $.env.get('HOME')) ?? ''
+  const id = localWorkspaceAt(await readLocalFolders($, home), sm.cwd)
+  if (!id) return null
+  const out = await listMine($)
+  const row = 'fail' in out ? undefined : out.rows.find((r) => r.id === id)
+  return row ? { id: row.id, name: row.name } : null
+}
+
 /** Look at the folder's git remote and ask HiveOp which workspace it belongs to. Joins by itself when the person chose that. */
 async function detectFolder($: Engine): Promise<void> {
   try {
@@ -1280,7 +1290,8 @@ async function detectFolder($: Engine): Promise<void> {
     const remote = await gitRemote($, sm.cwd)
     const m = remote ? await matchWorkspaces($, remote) : null
     const opened = await takeJoinOnOpen($, sm.folderKey)
-    const mine = (opened ? m?.mine.find((x) => x.id === opened) : undefined) ?? m?.mine[0]
+    const local = m?.mine.length ? null : await localHere($)
+    const mine = local ?? (opened ? m?.mine.find((x) => x.id === opened) : undefined) ?? m?.mine[0]
     const other = m?.joinable[0]
     if (remote && (mine || other)) await rememberClone($, remote, sm.cwd)
     if (mine) await setSeat($, { folder: 'mine', target: mine })
@@ -2101,14 +2112,16 @@ export const register: Register = (on) => {
                 return (
                 <Box key={`ws-${w.id}`} flexDirection="column">
                 <Box justifyContent="space-between" gap={2}>
-                  <Text wrap="truncate-end">
-                    <Text bold>{w.name}</Text>
-                    {st.seat?.workspaceId === w.id ? '  joined' : ''}
-                    {agentSummary(agents)}
-                  </Text>
+                  <Box gap={1} flexShrink={1}>
+                    <Button key={`ws-name-${w.id}`} label={oneLine(w.name, 40)} plain onPress={() => void openRoom($, w)} />
+                    <Text wrap="truncate-end">
+                      {st.seat?.workspaceId === w.id ? ' joined' : ''}
+                      {agentSummary(agents)}
+                    </Text>
+                  </Box>
                   <Box gap={2}>
                     {(() => {
-                      const dir = nv.clones[normRemote(w.repoUrl)]
+                      const dir = nv.clones[normRemote(w.repoUrl)] ?? (w.kind === 'local' ? nv.localDirs?.[w.id] : undefined)
                       if (st.seat?.workspaceId === w.id) return null
                       if (st.folder === 'mine' && st.target?.id === w.id)
                         return <Button key={`ws-code-${w.id}`} label="Code here" variant="primary" onPress={() => void joinSeat($, w)} />
