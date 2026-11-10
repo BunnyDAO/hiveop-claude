@@ -331,8 +331,8 @@ test('band: plain hotkey buttons, the logo Image on the terminal and the glyph o
     }
     if (surface === 'terminal') {
       expect(shown).toContain('"type":"Image"')
-      expect(shown).toContain('"columns":4')
-      expect(shown).toContain('"rows":2')
+      expect(shown).toContain('"columns":8')
+      expect(shown).toContain('"rows":4')
     } else {
       expect(shown).not.toContain('Image')
       expect(shown).toContain('⬡')
