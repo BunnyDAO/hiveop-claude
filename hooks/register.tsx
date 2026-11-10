@@ -2003,9 +2003,9 @@ export const register: Register = (on) => {
     const hot = () => String(++n)
     const signedIn = v.phase === 'signed-in'
     return (
-      <Box gap={2}>
-        <Box width={3}>
-          {Img ? <Img key="band-logo" source={{ png: LOGO_PNG }} columns={2} rows={1} alt="⬡" /> : <Text bold color={BRAND}>⬡</Text>}
+      <Box gap={2} alignItems="center">
+        <Box width={Img ? 5 : 3}>
+          {Img ? <Img key="band-logo" source={{ png: LOGO_PNG }} columns={4} rows={2} alt="⬡" /> : <Text bold color={BRAND}>⬡</Text>}
         </Box>
         <Box flexGrow={1}>
           <Text wrap="truncate-end">
