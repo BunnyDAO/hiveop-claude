@@ -97,3 +97,7 @@ HiveOp can ask for a newer plugin, or pause the plugin. The band then says
 **Please update HiveOp** (run `claude plugin update hiveop`) or that it is paused,
 and the plugin stops asking HiveOp for anything until it's allowed again. It
 checks back every 15 minutes, or when you press **Check again**. Your sign-in is kept.
+
+## License
+
+Proprietary. Copyright (c) 2026 Wenrwa, LLC. All rights reserved. See [LICENSE](LICENSE).
