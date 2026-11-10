@@ -55,7 +55,7 @@ export type PilotRow = { wallet: string; name: string }
 
 /** Home, workspaces and people: what the pane draws besides the chat. Names here are other people's: pane only. */
 export type NavView = {
-  screen: 'home' | 'workspaces' | 'people' | 'alerts'
+  screen: 'home' | 'workspaces' | 'people' | 'alerts' | 'swarm'
   tab: 'mine' | 'invites' | 'explore'
   // The band above the prompt: person's choice, kept across sessions.
   band: 'shown' | 'hidden'
@@ -67,6 +67,8 @@ export type NavView = {
   people: { query: string; rows: PilotRow[]; following: string[]; offset: number; more: boolean; loaded: boolean }
   // Clones on this computer (hcp-22): normalised git remote → folder. Pane only.
   clones: Record<string, string>
+  // hcp-07: the person's swarm channels they may see, once opened. Pane only.
+  swarm?: { rows: Array<{ swarmId: string; swarmName: string; channelId: string; name: string }> | null }
   // hcp-09: notifications (mentions and the rest): unread count, and the list once opened. Pane, band and toasts only.
   alerts?: { count: number; rows: AlertRow[] | null }
 }

@@ -19,6 +19,13 @@ with a Claim button. Home has Claim next (it takes the top ready item as you, an
 says the server's reason if you already hold one). Toasts tell you when work is
 new, claimed or done.
 
+## Swarm and Global
+
+Home has **Swarm** (the channels of your swarms you may see; staff-only channels
+only for owners and officers) and **Global** (the room for everyone on HiveOp).
+Each opens as a chat tab, live like workspace chat, posting as you. Agents can
+never post to Global, and none of it ever reaches the model.
+
 ## Mentions and alerts
 
 Write `@Name` in workspace chat to notify a member. When someone mentions you (or

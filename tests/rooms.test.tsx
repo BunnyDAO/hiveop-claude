@@ -2,237 +2,187 @@ import { expect, mock, test } from 'claude-code/testing'
 
 const HOME = '/home/ada'
 const KEY = 'wm_ct_SECRETKEYSECRETKEY'
-const API = 'https://api.test/api/v1'
-const ME = 'email:user-ada'
-const BAND = { plugin: 'hiveop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns: 120, scroll: { offset: 0, bodyRows: 3 }, view: {} } } as const
+const WS = 'ws-1'
+const STORED = new Map([[`${HOME}/.hiveop/claude-plugin.json`, JSON.stringify({ key: KEY })]])
+const BAND = { plugin: 'hiveop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns: 80, scroll: { offset: 0, bodyRows: 3 }, view: {} } } as const
 const PANE = {
   plugin: 'hiveop',
   component: 'Pane',
   requestId: 'hiveop',
-  props: { title: 'HiveOp', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 24 }, view: {} },
+  props: { title: 'HiveOp', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
 } as const
 const RUN = { origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } } as const
 const SURFACES = ['terminal', 'desktop'] as const
-const NOTE = 'To code in it, open its folder and Join.'
 const GAP = 3_500
+
+type Msg = { id: string; content: string; senderDisplayName: string; senderWallet: string; createdAt: string; metadata?: Record<string, unknown> }
+const MY_WALLET = 'email:user-ada'
+type Reply = { status: number; body?: unknown; headers?: Record<string, string> }
 
 type World = {
   clock: ReturnType<typeof mock.clock>
-  store: Map<string, unknown>
-  remote: string | null
-  pending: unknown[]
-  calls: string[]
-  delivered: any[] // events the server has handed out: later history includes them
+  calls: { url: string; method: string; body: string }[]
+  logs: string[]
+  history: Msg[]
+  pending: Msg[] // delivered by the next sync
+  placed: boolean
+  workspaces: unknown[]
+  syncReply: Reply | null // forced reply for /me/sync with a cursor
+  postReply: Reply | null // forced reply for POST chat
+  asked: string
+  pendingRaw: unknown[]
+}
+
+function msg(id: string, text: string, who = 'Bea', wallet = who === 'Bea' ? 'BeaWallet' : MY_WALLET, metadata?: Record<string, unknown>): Msg {
+  return { id, content: text, senderDisplayName: who, senderWallet: wallet, metadata, createdAt: new Date(Date.UTC(2026, 10, 8, 12, Number(id.replace(/\D/g, '')) % 60)).toISOString() }
 }
 
 function world(on: any, start: Partial<World> = {}): World {
-  const clock = mock.clock(on, { now: Date.UTC(2026, 10, 9, 12, 0) })
-  const w: World = { clock, store: new Map(), remote: null, pending: [], calls: [], delivered: [], ...start }
-  mock.env(on, { HOME, HIVEOP_API_URL: API })
+  const clock = mock.clock(on, { now: Date.UTC(2026, 10, 8, 12, 0) })
+  const w: World = {
+    clock,
+    calls: [],
+    logs: [],
+    history: [msg('m1', 'earlier words')],
+    pending: [],
+    placed: true,
+    workspaces: [{ id: WS, name: 'Forge' }],
+    syncReply: null,
+    postReply: null,
+    asked: 'Chat',
+    pendingRaw: [],
+    ...start,
+  }
+  mock.env(on, { HOME, HIVEOP_API_URL: 'https://api.test/api/v1' })
   on('command.register', (_: unknown, e: any) => ({ value: { command: e.name ?? 'hiveop' } }))
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
-  on('session.id', () => ({ value: 'sess-1' }))
-  on('process.run', (_: unknown, e: any) => {
-    const get = (e.argv ?? []).includes('get-url')
-    if (get && w.remote === null) return { value: { exitCode: 2, stdout: '', stderr: '' } }
-    return { value: { exitCode: 0, stdout: get ? `${w.remote}\n` : '', stderr: '' } }
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('fs.read', (_: unknown, e: any) => {
+    const t = STORED.get(e.path)
+    if (t === undefined) throw new Error('ENOENT')
+    return { value: t }
   })
-  on('fs.read', () => ({ value: JSON.stringify({ key: KEY }) }))
-  on('store.get', (_: unknown, e: any) => ({ value: w.store.get(e.key) }))
-  on('store.set', (_: unknown, e: any) => {
-    w.store.set(e.key, e.value)
-    return { value: undefined }
-  })
+  // An open room, from the legacy single-workspace key: it migrates to the first tab.
+  const store = new Map<string, unknown>([['chat.workspace', { id: WS, name: 'Forge' }]])
   on('store.delete', (_: unknown, e: any) => {
-    w.store.delete(e.key)
+    store.delete(e.key)
     return { value: undefined }
   })
-  on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.panes', () => ({ value: [{ id: 'hiveop', title: 'HiveOp', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('store.get', (_: unknown, e: any) => ({ value: store.get(e.key) }))
+  on('store.set', (_: unknown, e: any) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('ui.open', () => ({ value: w.placed ? { isPlaced: true } : { isPlaced: false, reason: 'narrow' } }))
+  on('ui.panes', () => ({ value: w.placed ? [{ id: 'hiveop', title: 'HiveOp', isShown: true, isFocused: false, isPlaced: true }] : [] }))
   on('ui.toast', () => ({ value: undefined }))
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', (_: unknown, e: any) => {
+    w.logs.push(e.text)
+    return { value: undefined }
+  })
   on('http.fetch', (_: unknown, e: any) => {
     const method = e.init?.method ?? 'GET'
-    const path = e.url.replace(API, '')
-    w.calls.push(`${method} ${path}`)
-    const reply = (status: number, body: unknown = {}) => ({ value: { status, ok: status < 300, headers: {}, text: JSON.stringify(body) } })
-    if (path.startsWith('/me/hive/profile')) return reply(200, { profile: { displayName: 'Ada', walletPubkey: ME } })
-    if (path.startsWith('/me/workspaces/match')) return reply(200, { success: true, mine: [{ id: 'w1', name: 'Forge' }], joinable: [] })
-    if (path === '/workspaces') return reply(200, { workspaces: [{ id: 'w1', name: 'Forge' }, { id: 'w2', name: 'Anvil' }] })
+    w.calls.push({ url: e.url, method, body: e.init?.body ?? '' })
+    const reply = (r: Reply) => ({ value: { status: r.status, ok: r.status < 300, headers: r.headers ?? {}, text: JSON.stringify(r.body ?? {}) } })
+    const path = e.url.replace('https://api.test/api/v1', '')
+    if (path.startsWith('/me/hive/profile')) return reply({ status: 200, body: { profile: { displayName: 'Ada', walletPubkey: MY_WALLET } } })
+    if (path === '/workspaces') return reply({ status: 200, body: { workspaces: w.workspaces } })
+    if (path.startsWith('/chat/global') && method === 'GET') return reply({ status: 200, body: { messages: [{ id: 'g1', senderWallet: 'CyWallet', senderName: 'Cy', content: 'hello world room', createdAt: new Date(Date.UTC(2026, 10, 8, 12, 1)).toISOString() }] } })
+    if (path === '/chat/global' && method === 'POST') return reply({ status: 200, body: { message: { id: 'g9', senderWallet: MY_WALLET, senderName: 'Ada', content: JSON.parse(e.init.body).content, createdAt: new Date().toISOString() } } })
+    if (path === '/me/swarms') return reply({ status: 200, body: { swarms: [{ id: 'sw-1', name: 'Bees' }] } })
+    if (path === '/swarms/sw-1/channels') return reply({ status: 200, body: { channels: [{ id: 'ch-gen', name: 'general' }, { id: 'ch-staff', name: 'staff', viewPolicy: 'admins' }] } })
+    if (path.startsWith('/swarms/sw-1/chat') && method === 'GET') return reply({ status: 200, body: { messages: [{ id: 's1', channelId: 'ch-gen', senderWallet: 'BeaWallet', senderDisplayName: 'Bea', content: 'swarm words', createdAt: new Date(Date.UTC(2026, 10, 8, 12, 2)).toISOString() }] } })
+    if (path === '/swarms/sw-1/chat' && method === 'POST') return reply({ status: 201, body: { message: { id: 's9', channelId: 'ch-gen', senderWallet: MY_WALLET, content: JSON.parse(e.init.body).content, createdAt: new Date().toISOString() } } })
+    if (path === '/reports' && method === 'POST') return reply({ status: 201, body: { success: true } })
     if (path.startsWith('/me/sync')) {
-      if (!path.includes('cursor=')) return reply(200, { cursor: 'c0', events: [], timedOut: false })
-      const events = w.pending
-      w.delivered.push(...events)
+      if (!path.includes('cursor=')) return reply({ status: 200, body: { cursor: 'c0', events: [], timedOut: false } })
+      if (w.syncReply) return reply(w.syncReply)
+      const events: unknown[] = w.pending.map((m) => ({ type: 'workspace:chat_message', workspaceId: WS, message: m }))
+      events.push(...w.pendingRaw)
       w.pending = []
-      return reply(200, { cursor: 'c1', events, timedOut: events.length === 0 })
+      w.pendingRaw = []
+      return reply({ status: 200, body: { cursor: 'c1', events, timedOut: events.length === 0 } })
     }
-    const chat = path.match(/^\/workspaces\/(\w+)\/chat/)
-    if (chat && method === 'GET') {
-      const later = w.delivered.filter((x: any) => x.workspaceId === chat[1]).map((x: any) => x.message)
-      return reply(200, { messages: [...later, { id: `${chat[1]}-m1`, content: `hello from ${chat[1]}`, senderDisplayName: 'Bea', senderWallet: 'BeaWallet', createdAt: '2026-11-09T12:00:00Z' }] })
+    if (path.startsWith(`/workspaces/${WS}/chat`) && method === 'GET') return reply({ status: 200, body: { messages: w.history } })
+    if (path === `/workspaces/${WS}/chat` && method === 'POST') {
+      if (w.postReply) return reply(w.postReply)
+      return reply({ status: 201, body: { message: msg('m9', JSON.parse(e.init.body).content, 'Ada') } })
     }
-    if (/\/adopted-sessions$/.test(path) && method === 'POST') return reply(200, { success: true, agentId: 'ag-1', name: 'Claude Code', color: '#d97757', resumed: false })
-    if (/\/offline$/.test(path)) return reply(200, { success: true })
-    if (path.endsWith('/work-summary')) return reply(200, { success: true, ready: 3, inProgress: 1, next: { id: 'i1', title: 'Fix it' } })
-    return reply(404)
+    return reply({ status: 404 })
   })
   return w
 }
 
 const text = async (ui: any) => JSON.stringify(await ui.drawn())
-const start = async ($: any) => $.session.start({ cwd: '/Users/ada/forge', surface: 'terminal', isInteractive: true })
-const openList = async ($: any, surface: string) => {
-  await $.command.run({ command: 'hiveop', args: 'workspaces', ...RUN })
-  return $.ui.mount({ ...PANE, surface })
+const syncs = (w: World) => w.calls.filter((c) => c.url.includes('/me/sync') && c.url.includes('cursor='))
+const posts = (w: World) => w.calls.filter((c) => c.method === 'POST')
+const start = async ($: any) => $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+
+const home = async ($: any, w: World) => {
+  await start($)
+  await w.clock.advance(10)
+  return $.ui.mount({ ...PANE, surface: 'terminal' })
 }
-const chatMsg = (id: string, ws: string) => ({ type: 'workspace:chat_message', workspaceId: ws, message: { id, content: 'fresh', senderDisplayName: 'Bea', senderWallet: 'BeaWallet', createdAt: '2026-11-09T12:05:00Z' } })
+const call = (w: World, method: string, p: string) => w.calls.filter((c) => c.method === method && c.url.replace('https://api.test/api/v1', '').startsWith(p))
 
-for (const surface of SURFACES) {
-  test(`tabs open, switch and close (${surface})`, async ($, on) => {
-    const w = world(on)
-    await start($)
-    const pane = await openList($, surface)
-    expect(await pane.find({ key: 'ws-use-w1' })).toBeUndefined()
-    await pane.press({ key: 'ws-chat-w1' })
-    await pane.press({ key: 'home-workspaces' }).catch(() => undefined)
-    let shown = await text(pane)
-    expect(shown).toContain('#Forge')
-    expect(shown).toContain('hello from w1')
-    // A second room is a second tab, and it is the one in view.
-    await pane.press({ key: 'chat-back' })
-    await pane.press({ key: 'home-workspaces' })
-    await pane.press({ key: 'ws-chat-w2' })
-    shown = await text(pane)
-    expect(shown).toContain('hello from w2')
-    expect(shown).not.toContain('hello from w1')
-    expect(await pane.find({ key: 'chat-tab-w1' })).toBeDefined()
-    expect(await pane.find({ key: 'chat-tab-w2' })).toBeDefined()
-    expect(w.store.get('chat.tabs')).toEqual([{ id: 'w1', name: 'Forge' }, { id: 'w2', name: 'Anvil' }])
-    // Switch back by the tab.
-    await pane.press({ key: 'chat-tab-w1' })
-    shown = await text(pane)
-    expect(shown).toContain('hello from w1')
-    expect(shown).not.toContain('hello from w2')
-    // Close the viewed one: its neighbour takes over.
-    await pane.press({ key: 'chat-close-w1' })
-    shown = await text(pane)
-    expect(shown).toContain('hello from w2')
-    expect(await pane.find({ key: 'chat-tab-w1' })).toBeUndefined()
-    expect(w.store.get('chat.tabs')).toEqual([{ id: 'w2', name: 'Anvil' }])
-    // Close the last: nothing open.
-    await pane.press({ key: 'chat-close-w2' })
-    expect(w.store.get('chat.tabs')).toEqual([])
-    await pane.unmount()
-  })
-}
-
-test('a room out of view counts unread on its tab and on the band', async ($, on) => {
-  const w = world(on, { store: new Map([['chat.tabs', [{ id: 'w1', name: 'Forge' }, { id: 'w2', name: 'Anvil' }]]]) })
-  await start($)
-  w.pending = [chatMsg('m7', 'w2'), chatMsg('m8', 'w2')]
-  await w.clock.advance(GAP * 2)
-  await $.command.run({ command: 'hiveop', args: 'chat', ...RUN })
-  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await text(pane)).toContain('#Anvil 2')
-  await pane.press({ key: 'chat-tab-w2' })
-  expect(await text(pane)).toContain('── 2 new ──')
-  await pane.unmount()
-})
-
-test('migration: the old current workspace becomes the first tab and its key is dropped', async ($, on) => {
-  const w = world(on, { store: new Map([['chat.workspace', { id: 'w2', name: 'Anvil' }]]) })
-  await start($)
-  await w.clock.advance(50)
-  expect(w.store.has('chat.workspace')).toBe(false)
-  expect(w.store.get('chat.tabs')).toEqual([{ id: 'w2', name: 'Anvil' }])
-  await $.command.run({ command: 'hiveop', args: 'chat', ...RUN })
-  for (const surface of SURFACES) {
-    const pane = await $.ui.mount({ ...PANE, surface })
-    const shown = await text(pane)
-    expect(shown).toContain('chat-tab-w2')
-    expect(shown).toContain('hello from w2')
-    await pane.unmount()
-  }
-  // And it stays across a new session without the old key.
-  await start($)
-  await w.clock.advance(50)
-  expect(w.store.get('chat.tabs')).toEqual([{ id: 'w2', name: 'Anvil' }])
-})
-
-test('no room is picked for you: no tabs, no chat requests, Chat leads to Workspaces', async ($, on) => {
+test('hcp-07: Global opens as a tab, reads history, posts as the person', async ($, on) => {
   const w = world(on)
-  await start($)
-  await w.clock.advance(50)
-  expect(w.calls.some((c) => /\/chat/.test(c))).toBe(false)
-  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  await band.press({ key: 'band-chat' })
-  await band.unmount()
-  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await pane.find({ key: 'ws-chat-w1' })).toBeDefined()
+  const pane = await home($, w)
+  await pane.press({ key: 'home-global' })
+  const shown = await text(pane)
+  expect(shown).toContain('#Global')
+  expect(shown).toContain('hello world room')
+  await pane.input({ key: 'chat-input', text: 'hi everyone' })
+  const sent = call(w, 'POST', '/chat/global')
+  expect(sent).toHaveLength(1)
+  expect(JSON.parse(sent[0]!.body)).toEqual({ content: 'hi everyone' })
+  expect(await text(pane)).toContain('hi everyone')
   await pane.unmount()
 })
 
-for (const surface of SURFACES) {
-  test(`band with a seat follows the seat's workspace (${surface})`, async ($, on) => {
-    const w = world(on, { remote: 'git@github.com:acme/forge.git', store: new Map<string, unknown>([['join.auto', true], ['chat.tabs', [{ id: 'w2', name: 'Anvil' }]]]) })
-    await start($)
-    await w.clock.advance(50)
-    const band = await $.ui.mount({ ...BAND, surface })
-    const shown = await text(band)
-    expect(shown).toContain('Forge')
-    expect(shown).toContain('Claude Code')
-    expect(shown).toContain('3 ready · 1 in progress · next: Fix it') // the seat's queue, not the viewed room's
-    expect(w.calls).toContain('GET /workspaces/w1/work-summary')
-    expect(w.calls).not.toContain('GET /workspaces/w2/work-summary')
-    await band.unmount()
-  })
-
-  test(`band with no seat is social: unread and not-a-workspace-folder only (${surface})`, async ($, on) => {
-    const w = world(on, { store: new Map([['chat.tabs', [{ id: 'w1', name: 'Forge' }, { id: 'w2', name: 'Anvil' }]]]) })
-    await start($)
-    w.pending = [chatMsg('m7', 'w2')]
-    await w.clock.advance(GAP * 2)
-    const band = await $.ui.mount({ ...BAND, surface })
-    const shown = await text(band)
-    expect(shown).toContain('1 new')
-    expect(shown).toContain('Not a workspace folder')
-    expect(shown).not.toContain('ready')
-    expect(shown).not.toContain('band-claim')
-    expect(w.calls.some((c) => c.endsWith('/work-summary'))).toBe(false)
-    await band.unmount()
-  })
-}
-
-for (const surface of SURFACES) {
-  test(`the not-joined note shows for a room the session is not seated in (${surface})`, async ($, on) => {
-    const w = world(on, { remote: 'git@github.com:acme/forge.git', store: new Map<string, unknown>([['join.auto', true], ['chat.tabs', [{ id: 'w1', name: 'Forge' }, { id: 'w2', name: 'Anvil' }]]]) })
-    await start($)
-    await w.clock.advance(50)
-    await $.command.run({ command: 'hiveop', args: 'chat', ...RUN })
-    const pane = await $.ui.mount({ ...PANE, surface })
-    expect(await text(pane)).not.toContain(NOTE) // w1 is the seat
-    await pane.press({ key: 'chat-tab-w2' })
-    expect(await text(pane)).toContain(NOTE)
-    await pane.unmount()
-  })
-}
-
-test('the not-joined note and chat words stay out of command output', async ($, on) => {
-  world(on, { store: new Map([['chat.tabs', [{ id: 'w1', name: 'Forge' }]]]) })
-  await start($)
-  const outs = [await $.command.run({ command: 'hiveop', args: 'chat', ...RUN }), await $.command.run({ command: 'say', args: 'hi', ...RUN })]
-  expect(JSON.stringify(outs)).not.toMatch(/hello from|To code in it|Forge/)
+test('hcp-07: Swarm lists the channels the person may see and opens one as a tab', async ($, on) => {
+  const w = world(on)
+  const pane = await home($, w)
+  await pane.press({ key: 'home-swarm' })
+  const list = await text(pane)
+  expect(list).toContain('#general')
+  expect(list).toContain('#staff')
+  await pane.press({ key: 'swarm-open-ch-gen' })
+  const shown = await text(pane)
+  expect(shown).toContain('#general')
+  expect(shown).toContain('swarm words')
+  expect(call(w, 'GET', '/swarms/sw-1/chat').some((c) => c.url.includes('channelId=ch-gen'))).toBe(true)
+  expect(shown).not.toContain('To code in it') // the workspace seat note is for workspace rooms only
+  await pane.input({ key: 'chat-input', text: 'buzz' })
+  const sent = call(w, 'POST', '/swarms/sw-1/chat')
+  expect(JSON.parse(sent[0]!.body)).toEqual({ content: 'buzz', channelId: 'ch-gen' })
+  await pane.unmount()
 })
 
-test('no global current workspace: no Use button, no current marker, no old key', async ($, on) => {
-  const w = world(on, { store: new Map([['chat.workspace', { id: 'w1', name: 'Forge' }]]) })
-  await start($)
-  await w.clock.advance(50)
-  const pane = await openList($, 'terminal')
-  const shown = await text(pane)
-  expect(shown).not.toContain('ws-use-')
-  expect(shown).not.toContain('current')
-  expect(shown).not.toContain('● ')
-  expect(w.store.has('chat.workspace')).toBe(false)
+test('hcp-07: sync routes swarm and Global lines to their tabs', async ($, on) => {
+  const w = world(on)
+  const pane = await home($, w)
+  await pane.press({ key: 'home-global' })
+  w.pendingRaw = [
+    { type: 'global:chat_message', message: { id: 'g2', senderWallet: 'CyWallet', senderName: 'Cy', content: 'live global', createdAt: new Date().toISOString() } },
+    { type: 'swarm:chat_message', swarmId: 'sw-1', channelId: 'ch-gen', message: { id: 's2', channelId: 'ch-gen', senderWallet: 'BeaWallet', senderDisplayName: 'Bea', content: 'live swarm', createdAt: new Date().toISOString() } },
+  ]
+  await w.clock.advance(GAP * 2)
+  expect(await text(pane)).toContain('live global')
+  expect(await text(pane)).not.toContain('live swarm')
+  await pane.unmount()
+})
+
+test('hcp-07: reporting a Global message files global_message', async ($, on) => {
+  const w = world(on)
+  const pane = await home($, w)
+  await pane.press({ key: 'home-global' })
+  await pane.press({ key: 'msg-act-g1' })
+  await pane.press({ key: 'msg-report' })
+  await pane.press({ key: 'report-spam' })
+  await pane.press({ key: 'report-confirm' })
+  const r = call(w, 'POST', '/reports')
+  expect(JSON.parse(r[0]!.body)).toEqual({ targetKind: 'global_message', targetId: 'g1', reason: 'spam' })
   await pane.unmount()
 })

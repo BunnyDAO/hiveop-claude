@@ -143,7 +143,7 @@ function toMsg(raw: unknown, me: string | null): ChatMsg | null {
   const meta = (m.metadata && typeof m.metadata === 'object' ? m.metadata : {}) as Record<string, unknown>
   // Mine = sent from my account and not by one of my agents. Never by display name.
   const mine = !str(meta.agentId) && sameWallet(str(m.senderWallet), me)
-  const name = mine ? SELF_LABEL : str(meta.agentName).trim() || str(m.senderDisplayName).trim() || 'member'
+  const name = mine ? SELF_LABEL : str(meta.agentName).trim() || str(m.senderDisplayName).trim() || str(m.senderName).trim() || 'member'
   const at = Date.parse(str(m.createdAt)) || 0
   const agentId = str(meta.agentId)
   const wallet = str(m.senderWallet)
@@ -195,7 +195,8 @@ async function hidePerson($: Engine, m: ChatMsg, kind: 'mute' | 'block'): Promis
 }
 
 async function sendReport($: Engine, m: ChatMsg, reason: 'spam' | 'abuse' | 'other'): Promise<void> {
-  const r = await hiveop($, '/reports', { method: 'POST', body: { targetKind: 'workspace_message', targetId: m.id, reason } })
+  const room = (await read($, chat)).workspace?.id ?? ''
+  const r = await hiveop($, '/reports', { method: 'POST', body: { targetKind: reportKindOf(room), targetId: m.id, reason } })
   await setAct($, null)
   $.ui.toast(r && r.ok ? 'HiveOp · Reported. Thanks.' : `HiveOp · ${refusal(r)}`)
 }
@@ -298,8 +299,74 @@ async function restoreTabs($: Engine): Promise<void> {
   await update($, chat, (c) => ({ ...c, tabs, workspace: tabs[0] ? { id: tabs[0].id, name: tabs[0].name } : null, status: tabs[0] ? 'loading' : 'no-workspace', messages: [], unread: 0, firstNewId: null }) as ChatView)
 }
 
+// ── hcp-07: a room is a workspace (its id), the Global room, or a swarm channel ──
+
+const GLOBAL_ROOM = 'global'
+type Room = { kind: 'workspace'; wsId: string } | { kind: 'global' } | { kind: 'swarm'; swarmId: string; channelId: string }
+
+function roomOf(id: string): Room {
+  if (id === GLOBAL_ROOM) return { kind: 'global' }
+  if (id.startsWith('swarm:')) {
+    const [, swarmId = '', channelId = ''] = id.split(':')
+    return { kind: 'swarm', swarmId, channelId }
+  }
+  return { kind: 'workspace', wsId: id }
+}
+
+function swarmRoomId(swarmId: string, channelId: string | null | undefined): string {
+  return `swarm:${swarmId}:${channelId ?? ''}`
+}
+
+function historyPath(id: string): string {
+  const r = roomOf(id)
+  if (r.kind === 'global') return `/chat/global?limit=${HISTORY}`
+  if (r.kind === 'swarm') return `/swarms/${encodeURIComponent(r.swarmId)}/chat?limit=${HISTORY}${r.channelId ? `&channelId=${encodeURIComponent(r.channelId)}` : ''}`
+  return `/workspaces/${encodeURIComponent(r.wsId)}/chat?limit=${HISTORY}`
+}
+
+function postOf(id: string, content: string): { path: string; body: Record<string, unknown> } {
+  const r = roomOf(id)
+  if (r.kind === 'global') return { path: '/chat/global', body: { content } }
+  if (r.kind === 'swarm') return { path: `/swarms/${encodeURIComponent(r.swarmId)}/chat`, body: { content, ...(r.channelId ? { channelId: r.channelId } : {}) } }
+  return { path: `/workspaces/${encodeURIComponent(r.wsId)}/chat`, body: { content } }
+}
+
+function reportKindOf(id: string): string {
+  const k = roomOf(id).kind
+  return k === 'global' ? 'global_message' : k === 'swarm' ? 'swarm_message' : 'workspace_message'
+}
+
+/** The room a sync chat event belongs to, or null when it is not a chat line. */
+function roomOfEvent(ev: Record<string, unknown>): string | null {
+  if (ev.type === 'workspace:chat_message') return str(ev.workspaceId) || null
+  if (ev.type === 'global:chat_message') return GLOBAL_ROOM
+  if (ev.type === 'swarm:chat_message') return str(ev.swarmId) ? swarmRoomId(str(ev.swarmId), str(ev.channelId) || null) : null
+  return null
+}
+
+async function openGlobal($: Engine): Promise<void> {
+  await openRoom($, { id: GLOBAL_ROOM, name: 'Global' })
+}
+
+/** The person's swarm channels they may see (staff-only ones only for staff: the server decides). */
+async function openSwarmList($: Engine): Promise<void> {
+  await goTo($, 'swarm')
+  await update($, nav, (n) => ({ ...n, swarm: { rows: null } }) as NavView)
+  const s = await hiveop($, '/me/swarms')
+  const swarms = s && s.ok && Array.isArray(s.body?.swarms) ? (s.body!.swarms as Array<Record<string, unknown>>) : []
+  const rows: Array<{ swarmId: string; swarmName: string; channelId: string; name: string }> = []
+  for (const sw of swarms.slice(0, 5)) {
+    const swarmId = str(sw.id)
+    if (!swarmId) continue
+    const c = await hiveop($, `/swarms/${encodeURIComponent(swarmId)}/channels`)
+    const chans = c && c.ok && Array.isArray(c.body?.channels) ? (c.body!.channels as Array<Record<string, unknown>>) : []
+    for (const ch of chans.slice(0, 20)) if (str(ch.id)) rows.push({ swarmId, swarmName: str(sw.name) || 'Swarm', channelId: str(ch.id), name: str(ch.name) || 'channel' })
+  }
+  await update($, nav, (n) => ({ ...n, swarm: { rows } }) as NavView)
+}
+
 async function loadHistory($: Engine, wsId: string, me: string | null): Promise<{ msgs: ChatMsg[] } | { r: Fetched | null }> {
-  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/chat?limit=${HISTORY}`)
+  const r = await hiveop($, historyPath(wsId))
   if (!r || !r.ok) return { r }
   const raw = Array.isArray(r.body?.messages) ? (r.body!.messages as unknown[]) : []
   return { msgs: raw.map((x) => toMsg(x, me)).filter((m): m is ChatMsg => m !== null) }
@@ -347,7 +414,7 @@ async function loadPresence($: Engine): Promise<void> {
   try {
     const v = await read($, chat)
     const wsId = v.workspace?.id
-    if (!wsId || v.screen !== 'chat') return
+    if (!wsId || v.screen !== 'chat' || roomOf(wsId).kind !== 'workspace') return
     const m = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/members`)
     const list = m && m.ok && Array.isArray(m.body?.members) ? (m.body!.members as Array<Record<string, unknown>>) : []
     const others = list
@@ -453,7 +520,8 @@ async function sendChat($: Engine, mem: ChatMem, raw: string): Promise<SendOutco
   const v = await read($, chat)
   if (!v.workspace) return 'no-room'
   await update($, chat, (c) => ({ ...c, draft: '', send: { phase: 'idle' } }) as ChatView)
-  const r = await hiveop($, `/workspaces/${encodeURIComponent(v.workspace.id)}/chat`, { method: 'POST', body: { content: text } })
+  const post = postOf(v.workspace.id, text)
+  const r = await hiveop($, post.path, { method: 'POST', body: post.body })
   if (!r) return 'signed-out'
   if (r.status === 429) {
     const seconds = r.retryAfterSec ?? 30
@@ -596,13 +664,13 @@ async function syncOnce($: Engine, mem: ChatMem): Promise<number> {
   const incoming: ChatMsg[] = []
   const elsewhere = new Map<string, number>()
   for (const ev of events) {
-    if (ev.type !== 'workspace:chat_message') continue
-    if (ev.workspaceId === v.workspace?.id) {
+    const room = roomOfEvent(ev)
+    if (!room) continue
+    if (room === v.workspace?.id) {
       const m = toMsg(ev.message, v.me)
       if (m) incoming.push(m)
-    } else if (v.tabs.some((t) => t.id === ev.workspaceId)) {
-      const id = str(ev.workspaceId)
-      elsewhere.set(id, (elsewhere.get(id) ?? 0) + 1)
+    } else if (v.tabs.some((t) => t.id === room)) {
+      elsewhere.set(room, (elsewhere.get(room) ?? 0) + 1)
     }
   }
   if (elsewhere.size > 0) {
@@ -2083,6 +2151,29 @@ export const register: Register = (on) => {
         </Box>
       )
     }
+    if (v.phase === 'signed-in' && c.screen !== 'chat' && nv.screen === 'swarm') {
+      const rowsS = nv.swarm?.rows
+      return (
+        <Box flexDirection="column">
+          {paneHead(ui, seatText)}
+          <Box paddingX={1} gap={2}>
+            <Text bold color={BRAND}>Swarm</Text>
+            <Box flexGrow={1} />
+            <Button key="nav-back" label="Back" plain onPress={() => void goTo($, 'home')} />
+          </Box>
+          {paneRule(ui, cols)}
+          <Box flexDirection="column" paddingX={1}>
+            {rowsS === null || rowsS === undefined ? <Text>Loading…</Text> : rowsS.length === 0 ? <Text>No swarm yet. Join one at app.hiveop.io.</Text> : null}
+            {(rowsS ?? []).slice(0, room).map((r) => (
+              <Box key={`swarm-row-${r.channelId}`} justifyContent="space-between" gap={2}>
+                <Text wrap="truncate-end">{`${oneLine(r.swarmName, 20)} #${oneLine(r.name, 24)}`}</Text>
+                <Button key={`swarm-open-${r.channelId}`} label="Open" plain onPress={() => void openRoom($, { id: swarmRoomId(r.swarmId, r.channelId), name: r.name })} />
+              </Box>
+            ))}
+          </Box>
+        </Box>
+      )
+    }
     if (v.phase === 'signed-in' && c.screen !== 'chat' && nv.screen === 'alerts') {
       const rowsA = nv.alerts?.rows
       return (
@@ -2204,7 +2295,7 @@ export const register: Register = (on) => {
           )}
           {paneRule(ui, cols)}
           <Box flexDirection="column" flexGrow={1} paddingX={1}>
-            {c.workspace && st.seat?.workspaceId !== c.workspace.id && <Text>{NOT_JOINED}</Text>}
+            {c.workspace && roomOf(c.workspace.id).kind === 'workspace' && st.seat?.workspaceId !== c.workspace.id && <Text>{NOT_JOINED}</Text>}
             {c.status === 'offline' && c.messages.length === 0 && <Text color="yellow">Offline. Retrying.</Text>}
             {!c.workspace && <Text>No chat open.</Text>}
             {c.status === 'loading' && c.messages.length === 0 && <Text>Loading…</Text>}
@@ -2340,6 +2431,8 @@ export const register: Register = (on) => {
             <Box gap={2}>
               <Button key="home-workspaces" plain label="Workspaces" onPress={() => void goTo($, 'workspaces')} />
               <Button key="home-people" plain label="People" onPress={() => void goTo($, 'people')} />
+              <Button key="home-swarm" plain label="Swarm" onPress={() => void openSwarmList($)} />
+              <Button key="home-global" plain label="Global" onPress={() => void openGlobal($)} />
               <Button key="sign-out" plain label="Sign out" onPress={() => void signOut($, mem)} />
             </Box>
             {nv.band === 'hidden' && <Button key="home-show-band" plain label="Show band" onPress={() => void setBand($, 'shown')} />}
