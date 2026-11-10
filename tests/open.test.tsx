@@ -38,6 +38,7 @@ type World = {
   dirs: Record<string, string[]>
   posts: { path: string }[]
   matchTo: Record<string, { id: string; name: string }>
+  paneOpens: number
 }
 
 function world(on: any, start: Partial<World> = {}): World {
@@ -62,6 +63,7 @@ function world(on: any, start: Partial<World> = {}): World {
     },
     posts: [],
     matchTo: { 'github.com/acme/forge': { id: 'w-forge', name: 'Forge' } },
+    paneOpens: 0,
     ...start,
   }
   mock.env(on, { HOME, HIVEOP_API_URL: API, TERM_PROGRAM: w.term })
@@ -92,7 +94,10 @@ function world(on: any, start: Partial<World> = {}): World {
     w.store.set(e.key, e.value)
     return { value: undefined }
   })
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', () => {
+    w.paneOpens++
+    return { value: { isPlaced: true } }
+  })
   on('ui.panes', () => ({ value: [{ id: 'hiveop', title: 'HiveOp', isShown: true, isFocused: false, isPlaced: true }] }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
@@ -251,6 +256,11 @@ test('a fresh join-on-open note joins without a click, and is consumed', async (
   await w.clock.advance(50)
   expect(adopts(w)).toHaveLength(1)
   expect((w.store.get('join.open') as Record<string, unknown>)[folderKey(CWD)]).toBeUndefined()
+  // Open lands in the pane, on this workspace's chat, with no /hiveop typed.
+  expect(w.paneOpens).toBe(1)
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await text(pane)).toContain('Forge')
+  expect(await pane.find({ key: 'chat-close-w-forge' })).toBeDefined()
 })
 
 test('an expired join-on-open note does not join, and is still removed', async ($, on) => {
@@ -261,6 +271,7 @@ test('an expired join-on-open note does not join, and is still removed', async (
   await w.clock.advance(50)
   expect(adopts(w)).toHaveLength(0)
   expect((w.store.get('join.open') as Record<string, unknown>)[folderKey(CWD)]).toBeUndefined()
+  expect(w.paneOpens).toBe(0)
 })
 
 test('remotes normalise across ssh and https', () => {

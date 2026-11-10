@@ -1291,9 +1291,18 @@ async function detectFolder($: Engine): Promise<void> {
     }
     const v = await read($, seat)
     if (mine && (v.auto || (opened && mine.id === opened))) await joinSeat($, mine)
+    // Opened from Workspaces → Open: land in the pane on this workspace's chat, no /hiveop to type.
+    if (mine && opened && mine.id === opened) await openPaneOnRoom($, mine)
   } catch {
     // The folder stays unchecked; the band simply offers nothing.
   }
+}
+
+async function openPaneOnRoom($: Engine, ws: { id: string; name: string }): Promise<void> {
+  const shown = await $.ui.open({ id: PANE, title: 'HiveOp' })
+  if (!shown.isPlaced) return
+  await ensureLoaded($)
+  await openRoom($, ws)
 }
 
 async function joinSeat($: Engine, ws: { id: string; name: string }): Promise<void> {
