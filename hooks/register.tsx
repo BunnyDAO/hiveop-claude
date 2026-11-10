@@ -2426,7 +2426,7 @@ export const register: Register = (on) => {
     }
     return (
       <Box flexDirection="column">
-        {paneHead(ui, v.phase === 'signed-in' ? (st.seat ? seatText : (v.name ?? 'you')) : '')}
+        {paneHead(ui, v.phase === 'signed-in' ? (v.name ?? 'you') : '')}
         {paneRule(ui, cols)}
         <Box flexDirection="column" paddingX={1}>
         {v.phase === 'signed-out' && (
@@ -2445,34 +2445,44 @@ export const register: Register = (on) => {
         )}
         {v.phase === 'signed-in' && (
           <Box flexDirection="column">
+            {st.seat ? (
+              <Box gap={2}>
+                <Text bold wrap="truncate-end">{`${oneLine(st.seat.workspaceName, 40)} · ${oneLine(st.seat.name, 30)}`}</Text>
+                <Button key="home-leave" plain label="Leave" onPress={() => void leaveSeat($)} />
+              </Box>
+            ) : st.folder !== 'none' ? (
+              <Box gap={2}>
+                {st.target && <Text bold wrap="truncate-end">{oneLine(st.target.name, 40)}</Text>}
+                <Button key="home-work" plain label={st.busy ? 'Joining…' : 'Work here'} onPress={() => void workHere($)} />
+              </Box>
+            ) : (
+              <Text>Not a workspace folder</Text>
+            )}
+            {st.note !== '' && <Text color={BRAND}>{oneLine(st.note, 100)}</Text>}
             <Box gap={2}>
               <Button key="open-chat" label={unreadTotal(c) > 0 ? `Chat · ${unreadTotal(c)} new` : 'Chat'} variant="primary" onPress={() => void showChat($)} />
               <Button key="home-alerts" plain label={(nv.alerts?.count ?? 0) > 0 ? `Alerts · ${nv.alerts!.count}` : 'Alerts'} onPress={() => void openAlerts($)} />
-              <Button key="home-work" plain label={st.busy ? 'Joining…' : 'Work here'} onPress={() => void workHere($)} />
-              <Button key="home-claim" plain label={wk.claiming ? 'Claiming…' : 'Claim next'} onPress={() => void claimNext($)} />
-            </Box>
-            {st.seat && wk.loaded && (
-              <Text wrap="truncate-end">
-                {`${wk.ready} ready · ${wk.inProgress} in progress${wk.next ? ` · next: ${oneLine(wk.next.title, 60)}` : ''}`}
-              </Text>
-            )}
-            {st.seat && wk.note !== '' && <Text color={BRAND}>{oneLine(wk.note, 100)}</Text>}
-            {st.seat && (
-              <Box gap={2}>
-                <Text wrap="truncate-end">{`In ${oneLine(st.seat.workspaceName, 40)} as ${oneLine(st.seat.name, 30)} `}</Text>
-                <Button key="home-leave" plain label="Leave" onPress={() => void leaveSeat($)} />
-              </Box>
-            )}
-            {st.note !== '' && <Text color={BRAND}>{oneLine(st.note, 100)}</Text>}
-            <Button key="home-auto" plain label={st.auto ? 'Join automatically in matching folders: on' : 'Join automatically in matching folders: off'} onPress={() => void setAuto($, !st.auto)} />
-            <Box gap={2}>
               <Button key="home-workspaces" plain label="Workspaces" onPress={() => void goTo($, 'workspaces')} />
               <Button key="home-people" plain label="People" onPress={() => void goTo($, 'people')} />
+            </Box>
+            {st.seat && (
+              <Box gap={2}>
+                <Button key="home-claim" plain label={wk.claiming ? 'Claiming…' : 'Claim next'} onPress={() => void claimNext($)} />
+                {wk.loaded && <Text wrap="truncate-end">{`${wk.ready} ready · ${wk.inProgress} in progress`}</Text>}
+              </Box>
+            )}
+            {st.seat && wk.loaded && wk.next && <Text wrap="truncate-end">{`next: ${oneLine(wk.next.title, 60)}`}</Text>}
+            {st.seat && wk.note !== '' && <Text color={BRAND}>{oneLine(wk.note, 100)}</Text>}
+            <Box gap={2}>
               <Button key="home-swarm" plain label="Swarm" onPress={() => void openSwarmList($)} />
               <Button key="home-global" plain label="Global" onPress={() => void openGlobal($)} />
-              <Button key="sign-out" plain label="Sign out" onPress={() => void signOut($, mem)} />
             </Box>
-            {nv.band === 'hidden' && <Button key="home-show-band" plain label="Show band" onPress={() => void setBand($, 'shown')} />}
+            {paneRule(ui, cols - 2)}
+            <Box gap={2}>
+              <Button key="home-auto" plain label={st.auto ? 'Auto-join: on' : 'Auto-join: off'} onPress={() => void setAuto($, !st.auto)} />
+              <Button key="sign-out" plain label="Sign out" onPress={() => void signOut($, mem)} />
+              {nv.band === 'hidden' && <Button key="home-show-band" plain label="Show band" onPress={() => void setBand($, 'shown')} />}
+            </Box>
           </Box>
         )}
         {v.phase === 'gated' && (

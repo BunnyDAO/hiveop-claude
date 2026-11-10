@@ -240,12 +240,13 @@ test('a refusal (not a member) is said in the server\'s words and no seat is tak
   await band.unmount()
 })
 
-test('home Work here with no matching folder joins nothing (the folder decides the workspace)', async ($, on) => {
+test('home with no matching folder offers no Work here and joins nothing (the folder decides the workspace)', async ($, on) => {
   const w = world(on, { match: { mine: [], joinable: [] }, answers: ['Forge'] })
   await start($)
   await w.clock.advance(50)
   const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await pane.press({ key: 'home-work' })
+  expect(await pane.find({ key: 'home-work' })).toBeUndefined()
+  expect(JSON.stringify(await pane.drawn())).toContain('Not a workspace folder')
   expect(adopts(w)).toHaveLength(0)
   await pane.unmount()
 })

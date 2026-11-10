@@ -168,7 +168,8 @@ test('home: Claim next is enabled and shows the counts', async ($, on) => {
     const pane = await $.ui.mount({ ...PANE, surface })
     const shown = await text(pane)
     expect(shown).toContain('"label":"Claim next"')
-    expect(shown).toContain('3 ready · 1 in progress · next: Fix the login bug')
+    expect(shown).toContain('3 ready · 1 in progress')
+    expect(shown).toContain('next: Fix the login bug')
     await pane.press({ key: 'home-claim' })
     await pane.unmount()
   }

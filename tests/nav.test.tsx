@@ -136,12 +136,14 @@ test('home: header with the name and every button, on both surfaces', async ($, 
     const pane = await open($, surface)
     expect(await text(pane)).toContain('⬡ HiveOp')
     expect(await text(pane)).toContain('Ada')
-    for (const key of ['open-chat', 'home-work', 'home-claim', 'home-workspaces', 'home-people', 'sign-out']) {
+    for (const key of ['open-chat', 'home-alerts', 'home-workspaces', 'home-people', 'home-swarm', 'home-global', 'home-auto', 'sign-out']) {
       expect(await pane.find({ key })).toBeDefined()
     }
     const shown = await text(pane)
-    expect(shown).toContain('Work here')
-    expect(shown).toContain('Claim next')
+    expect(shown).toContain('Auto-join: ')
+    expect(shown).not.toContain('Join automatically')
+    // Claim next only once this session is in a workspace.
+    expect(await pane.find({ key: 'home-claim' })).toBeUndefined()
     await pane.unmount()
   }
 })
