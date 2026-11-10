@@ -333,6 +333,43 @@ async function ensureLoaded($: Engine): Promise<void> {
   await update($, chat, (c) => ({ ...c, status: 'ready', messages: merge(c.messages, h.msgs) }) as ChatView)
 }
 
+// ── hcp-18: who else is online in the viewed room ──
+// Read when a room opens and when sync says presence changed in it. No timer.
+
+const presenceRun = { inflight: false, again: false }
+
+async function loadPresence($: Engine): Promise<void> {
+  if (presenceRun.inflight) {
+    presenceRun.again = true
+    return
+  }
+  presenceRun.inflight = true
+  try {
+    const v = await read($, chat)
+    const wsId = v.workspace?.id
+    if (!wsId || v.screen !== 'chat') return
+    const m = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/members`)
+    const list = m && m.ok && Array.isArray(m.body?.members) ? (m.body!.members as Array<Record<string, unknown>>) : []
+    const others = list
+      .map((x) => ({ wallet: str(x.walletPubkey), name: str(x.displayName).trim() || 'member' }))
+      .filter((x) => x.wallet && !sameWallet(x.wallet, v.me) && !hiddenWallets.has(bareWallet(x.wallet)))
+      .slice(0, 50)
+    let names: string[] = []
+    if (others.length > 0) {
+      const p = await hiveop($, `/presence?wallets=${encodeURIComponent(others.map((x) => x.wallet).join(','))}`)
+      const on = (p && p.ok && p.body?.online && typeof p.body.online === 'object' ? p.body.online : {}) as Record<string, unknown>
+      names = others.filter((x) => on[x.wallet] === true).map((x) => x.name)
+    }
+    await update($, chat, (c) => (c.workspace?.id === wsId ? ({ ...c, online: { wsId, names } } as ChatView) : c))
+  } finally {
+    presenceRun.inflight = false
+    if (presenceRun.again) {
+      presenceRun.again = false
+      void loadPresence($)
+    }
+  }
+}
+
 /** Open a workspace's room as a tab (or switch to it) and show it. */
 async function openRoom($: Engine, ws: { id: string; name: string }): Promise<void> {
   const before = await read($, chat)
@@ -367,6 +404,7 @@ async function openRoom($: Engine, ws: { id: string; name: string }): Promise<vo
     const msgs = merge([], h.msgs)
     return { ...c, status: 'ready', messages: msgs, firstNewId: pending > 0 ? (msgs[msgs.length - pending]?.id ?? null) : null } as ChatView
   })
+  await loadPresence($)
 }
 
 /** Close a tab. Closing the viewed one moves to its neighbour. */
@@ -395,6 +433,7 @@ async function openChat($: Engine): Promise<void> {
     const first = c.unread > 0 ? (c.messages[c.messages.length - c.unread]?.id ?? null) : null
     return { ...c, screen: 'chat', unread: 0, firstNewId: first } as ChatView
   })
+  await loadPresence($)
 }
 
 async function closeChat($: Engine): Promise<void> {
@@ -553,6 +592,7 @@ async function syncOnce($: Engine, mem: ChatMem): Promise<number> {
   const v = await read($, chat)
   await onWorkEvents($, events, v.me)
   await onAlertEvents($, events)
+  if (events.some((ev) => ev.type === 'workspace:presence_changed' && ev.workspaceId === v.workspace?.id)) await loadPresence($)
   const incoming: ChatMsg[] = []
   const elsewhere = new Map<string, number>()
   for (const ev of events) {
@@ -2117,7 +2157,7 @@ export const register: Register = (on) => {
     }
     if (v.phase === 'signed-in' && c.screen === 'chat') {
       // Newest messages that fit: each run costs a header row, the photo two.
-      const budget = Math.max(4, rows - 6)
+      const budget = Math.max(4, rows - 6 - (c.online && c.online.wsId === c.workspace?.id ? 1 : 0))
       let used = 0
       let from = c.messages.length
       while (from > 0) {
@@ -2154,6 +2194,14 @@ export const register: Register = (on) => {
             <Button key="chat-back" label="Back" plain onPress={() => void closeChat($)} />
             {c.workspace && <Button key={`chat-close-${c.workspace.id}`} label="✕" plain role="dismiss" onPress={() => void closeRoom($, c.workspace!.id)} />}
           </Box>
+          {c.online && c.online.wsId === c.workspace?.id && (
+            <Box paddingX={1}>
+              <Text wrap="truncate-end">
+                <Text color="green">{c.online.names.length > 0 ? `● ${c.online.names.length} online` : '○ No one else online'}</Text>
+                {c.online.names.length > 0 && ` · ${c.online.names.slice(0, 6).map((n) => oneLine(n, 16)).join(', ')}`}
+              </Text>
+            </Box>
+          )}
           {paneRule(ui, cols)}
           <Box flexDirection="column" flexGrow={1} paddingX={1}>
             {c.workspace && st.seat?.workspaceId !== c.workspace.id && <Text>{NOT_JOINED}</Text>}

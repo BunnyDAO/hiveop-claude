@@ -43,6 +43,8 @@ export type ChatView = {
   send: SendState
   // hcp-08: the message whose actions are open, and how far (menu → report reason → confirm).
   act?: { id: string; step: 'menu' | 'report' | 'confirm'; reason?: 'spam' | 'abuse' | 'other' } | null
+  // hcp-18: who else is online in the viewed room (names). Pane only.
+  online?: { wsId: string; names: string[] } | null
 }
 
 /** One workspace as a list row. */
