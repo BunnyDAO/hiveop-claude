@@ -281,8 +281,8 @@ async function followingAmong($: Engine, wallets: string[]): Promise<string[] | 
 }
 
 // (moved from client.ts)
-async function setFollow($: Engine, wallet: string, on: boolean): Promise<Fetched | null> {
-  return hiveop($, `/users/${encodeURIComponent(wallet)}/follow`, { method: on ? 'POST' : 'DELETE' })
+async function setFollow($: Engine, wallet: string, follow: boolean): Promise<Fetched | null> {
+  return hiveop($, `/users/${encodeURIComponent(wallet)}/follow`, { method: follow ? 'POST' : 'DELETE' })
 }
 
 // ── work (hcp-11) ──
@@ -1026,8 +1026,8 @@ async function loadPresence($: Engine): Promise<void> {
     let names: string[] = []
     if (others.length > 0) {
       const p = await hiveop($, `/presence?wallets=${encodeURIComponent(others.map((x) => x.wallet).join(','))}`)
-      const on = (p && p.ok && p.body?.online && typeof p.body.online === 'object' ? p.body.online : {}) as Record<string, unknown>
-      names = others.filter((x) => on[x.wallet] === true).map((x) => x.name)
+      const online = (p && p.ok && p.body?.online && typeof p.body.online === 'object' ? p.body.online : {}) as Record<string, unknown>
+      names = others.filter((x) => online[x.wallet] === true).map((x) => x.name)
     }
     await update($, chat, (c) => (c.workspace?.id === wsId ? ({ ...c, online: { wsId, names } } as ChatView) : c))
   } finally {
@@ -1837,8 +1837,8 @@ async function narrowPeople($: Engine): Promise<void> {
     }
     if (!got) return
     const p = rows[got.item]!
-    const on = n.people.following.includes(p.wallet)
-    const verb = on ? 'Unfollow' : 'Follow'
+    const isFollowing = n.people.following.includes(p.wallet)
+    const verb = isFollowing ? 'Unfollow' : 'Follow'
     const what = await ask($, p.name, [verb, 'Back'])
     if (what === verb) {
       await toggleFollow($, p)
@@ -1969,10 +1969,10 @@ async function requestSeatAccess($: Engine): Promise<void> {
   await setSeat($, { note: r && r.ok ? `Asked to join ${oneLine(v.target.name, 40)}.` : refusal(r) })
 }
 
-async function setAuto($: Engine, on: boolean): Promise<void> {
-  await $.store.set(STORE_AUTO, on)
-  await setSeat($, { auto: on })
-  if (on) {
+async function setAuto($: Engine, enabled: boolean): Promise<void> {
+  await $.store.set(STORE_AUTO, enabled)
+  await setSeat($, { auto: enabled })
+  if (enabled) {
     const v = await read($, seat)
     if (v.folder === 'mine' && v.target && !v.seat) await joinSeat($, v.target)
   }
