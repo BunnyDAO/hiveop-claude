@@ -596,14 +596,14 @@ async function cloneRepo($: Engine, repoUrl: string, dir: string, onPercent: (n:
     const run = $.process.spawn({ argv: ['git', ...pre, 'clone', '--progress', '--', repoUrl.trim(), dir], env: { GIT_TERMINAL_PROMPT: '0' } })
     let code: number | null = null
     while (true) {
-      const step = await run.next()
-      if (step.done) {
-        code = step.value.code
+      const chunk = await run.next()
+      if (chunk.done) {
+        code = chunk.value.code
         break
       }
-      if (step.value.stream !== 'stderr') continue
-      tail = (tail + step.value.text).slice(-2000)
-      const p = lastPercent(step.value.text)
+      if (chunk.value.stream !== 'stderr') continue
+      tail = (tail + chunk.value.text).slice(-2000)
+      const p = lastPercent(chunk.value.text)
       if (p !== null) onPercent(p)
     }
     return code === 0 ? { ok: true } : { ok: false, reason: cloneFailureLine(tail) }
@@ -1652,13 +1652,13 @@ async function setExploreText($: Engine, text: string): Promise<void> {
 
 /** Open workspaces are joined; the rest are asked. The server's refusal is shown as it said it. */
 async function joinRow($: Engine, row: WsRow): Promise<void> {
-  const ask = row.kind !== 'github'
-  const r = ask ? await requestToJoin($, row.id) : await joinWorkspace($, row.id)
+  const askFirst = row.kind !== 'github'
+  const r = askFirst ? await requestToJoin($, row.id) : await joinWorkspace($, row.id)
   if (!r || !r.ok) {
     await setNav($, { note: refusal(r) })
     return
   }
-  if (ask) {
+  if (askFirst) {
     await setNav($, { note: `Asked to join ${row.name}.` })
     return
   }
