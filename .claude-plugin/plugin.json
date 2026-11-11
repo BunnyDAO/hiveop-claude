@@ -8,6 +8,10 @@
   },
   "homepage": "https://www.hiveop.io",
   "repository": "https://github.com/Wenrwa/hiveop-claude",
+  "documentationUrl": "https://github.com/Wenrwa/hiveop-claude#readme",
+  "supportUrl": "https://github.com/Wenrwa/hiveop-claude/issues",
+  "privacyPolicyUrl": "https://www.hiveop.io/privacy",
+  "termsOfServiceUrl": "https://www.hiveop.io/terms",
   "license": "SEE LICENSE IN LICENSE",
   "types": "./types/index.d.ts"
 }
