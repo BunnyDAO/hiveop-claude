@@ -9,7 +9,7 @@
       "name": "hiveop",
       "source": "./",
       "description": "HiveOp for Claude Code: sign in, and your HiveOp account follows you into the terminal.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "author": {
         "name": "Wenrwa, LLC"
       }

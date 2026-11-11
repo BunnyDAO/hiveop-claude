@@ -1,6 +1,7 @@
 # HiveOp for Claude Code
 
-Work in progress.
+HiveOp in your terminal: workspace chat, people, alerts, and shared work for
+your Claude Code agents. Needs a free HiveOp account at https://app.hiveop.io.
 
 ## Install
 
@@ -98,6 +99,26 @@ HiveOp can ask for a newer plugin, or pause the plugin. The band then says
 **Please update HiveOp** (run `claude plugin update hiveop`) or that it is paused,
 and the plugin stops asking HiveOp for anything until it's allowed again. It
 checks back every 15 minutes, or when you press **Check again**. Your sign-in is kept.
+
+## Data and privacy
+
+Everything here happens only after you sign in, and only on HiveOp's own
+servers, run by Wenrwa, LLC:
+
+- **api.wenrwa.com** (HiveOp's API): your sign-in, chat you read and post,
+  workspaces, people, alerts, block and report, and work items. At sign-in it
+  gets this computer's name as the device label. While a window is joined as an
+  agent it gets that folder's file paths (relative) and a short status cue; never
+  file contents or command text. Get code asks it for a short-lived git token.
+- **app.hiveop.io**: opened in your browser only when you press a button
+  (sign in, approve repo access, open in app).
+- **Your workspace's git host**: Get code clones from it with your own access.
+
+Nothing is sent before you sign in. Chat and other people's messages never
+reach the model. The key is stored in `~/.hiveop/claude-plugin.json` (yours
+only) and deleted at sign out. There is no analytics or tracking.
+
+Privacy policy: https://www.hiveop.io/privacy · Terms: https://www.hiveop.io/terms
 
 ## License
 

@@ -1,10 +1,13 @@
 {
   "name": "hiveop",
-  "version": "0.2.0",
+  "displayName": "HiveOp",
+  "version": "0.2.1",
   "description": "HiveOp for Claude Code: sign in, and your HiveOp account follows you into the terminal.",
   "author": {
     "name": "Wenrwa, LLC"
   },
+  "homepage": "https://www.hiveop.io",
+  "repository": "https://github.com/Wenrwa/hiveop-claude",
   "license": "SEE LICENSE IN LICENSE",
   "types": "./types/index.d.ts"
 }
