@@ -1,58 +1,643 @@
 import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface as Engine, Register } from 'claude-code'
 
-import type { AlertRow, AuthView, ChatMsg, CloudAgent, CloudView, ChatTab, ChatView, InviteRow, NavView, PhotosView, PilotRow, SeatView, WorkView, WsRow } from '../types'
-import {
-  type Fetched,
-  acceptInvite,
-  approvalUrl,
-  apiBase,
-  adoptSession,
-  claimIssue,
-  computerName,
-  declineInvite,
-  fetchWorkSummary,
-  fileCloudRun,
-  fetchMe,
-  fileRepoAccess,
-  checkGate,
-  finishWork,
-  folderKey,
-  getIssue,
-  fetchAvatar,
-  followingAmong,
-  forgetKey,
-  gitRemote,
-  hiveop,
-  joinWorkspace,
-  leaveSession,
-  listCloudAgents,
-  listExplore,
-  listInvites,
-  listMine,
-  listPilots,
-  listReady,
-  takeGate,
-  loadKey,
-  matchWorkspaces,
-  openInBrowser,
-  pollApproval,
-  pollPairing,
-  repoAccess,
-  refusal,
-  requestToJoin,
-  saveKey,
-  setFollow,
-  sleepCloudAgent,
-  startPairing,
-  workspaceUrl,
-} from './client'
-import type { Gate } from './client'
+import type { AlertRow, AuthView, ChatMsg, ChatTab, ChatView, CloudAgent, CloudView, InviteRow, NavView, PhotosView, PilotRow, SeatView, WorkView, WsRow } from '../types'
+import { type Fetched, approvalUrl, folderKey, refusal, workspaceUrl, APPROVAL_PAGE, type Adopted, type ApprovalState, CLIENT_KIND, CLIENT_VERSION, DEFAULT_API, type Gate, type Matched, type Me, type Pairing, type PollOutcome, type WorkItem, type WorkSummary, gateOf, headers, parse, retryAfter, s, toItem, wsRow } from './client'
 import { LOGO_PNG } from './logo'
 import { activityOf, mergeActivity } from './activity'
 import type { ToolActivity } from './activity'
 import { KEY_REFUSAL, keyGuardReason } from './keyguard'
-import { chooseCloneFolder, cloneRepo, cloneableUrl, helperValue, httpsOrigin, inlinePluginDir, pinHelper, normRemote, openFolder, rememberClone, scanClones, takeJoinOnOpen, writeJoinOnOpen, readLocalFolders, localWorkspaceAt } from './launch'
+import { cloneableUrl, helperValue, httpsOrigin, inlinePluginDir, normRemote, localWorkspaceAt, type CloneTarget, type Cloned, OPEN_TTL_MS, type Opened, SCAN_CAP, STORE_CLONES, STORE_OPEN, claudeCommand, cloneFailureLine, hasControl, helperFlags, lastPercent, launchArgv, slugify } from './launch'
+
+// ── HiveOp client and launch helpers that take `$` ──
+// They live in this file because the plugin directory only accepts `$` passed
+// to a function declared in the same file as the hooks.
+// (moved from client.ts)
+async function apiBase($: Engine): Promise<string> {
+  const fromEnv = await $.env.get('HIVEOP_API_URL')
+  return (fromEnv && /^https?:\/\//.test(fromEnv) ? fromEnv : DEFAULT_API).replace(/\/+$/, '')
+}
+
+// (moved from client.ts)
+async function computerName($: Engine): Promise<string> {
+  try {
+    const r = await $.process.run(['hostname'])
+    const name = r.stdout.trim().replace(/\.local$/, '').slice(0, 80)
+    return name || 'this computer'
+  } catch {
+    return 'this computer'
+  }
+}
+
+// (moved from client.ts)
+async function startPairing($: Engine, computer: string): Promise<Pairing | null> {
+  try {
+    const res = await $.http.fetch(`${await apiBase($)}/pairing/codes`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ deviceLabel: computer, purpose: 'plugin' }),
+    })
+    const body = parse(res.text)
+    if (!res.ok || !body || typeof body.code !== 'string' || typeof body.pollToken !== 'string') return null
+    return {
+      code: body.code,
+      pollToken: body.pollToken,
+      expiresAt: String(body.expiresAt ?? ''),
+      link: `${APPROVAL_PAGE}?code=${encodeURIComponent(body.code)}`,
+    }
+  } catch {
+    return null
+  }
+}
+
+// (moved from client.ts)
+async function pollPairing($: Engine, pollToken: string): Promise<PollOutcome> {
+  try {
+    const res = await $.http.fetch(`${await apiBase($)}/pairing/poll`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ pollToken }),
+    })
+    const body = parse(res.text)
+    if (!res.ok || !body) return { status: 'unreachable' }
+    if (body.status === 'approved' && typeof body.connectToken === 'string') {
+      return { status: 'approved', key: body.connectToken }
+    }
+    if (body.status === 'denied') return { status: 'denied', reason: body.reason === 'not_open' ? 'not-open' : 'denied' }
+    if (body.status === 'expired') return { status: 'expired' }
+    if (body.status === 'pending') return { status: 'pending' }
+    return { status: 'unreachable' }
+  } catch {
+    return { status: 'unreachable' }
+  }
+}
+
+// ── key storage: one user-only file under the home folder ──
+
+// (moved from client.ts)
+async function keyDir($: Engine): Promise<string | null> {
+  const home = await $.env.get('HOME')
+  return home ? `${home}/.hiveop` : null
+}
+
+// (moved from client.ts)
+async function loadKey($: Engine): Promise<string | null> {
+  const dir = await keyDir($)
+  if (!dir) return null
+  try {
+    const body = parse((await $.fs.read(`${dir}/claude-plugin.json`)) as string)
+    return typeof body?.key === 'string' && body.key ? body.key : null
+  } catch {
+    return null
+  }
+}
+
+// (moved from client.ts)
+async function saveKey($: Engine, key: string): Promise<boolean> {
+  const dir = await keyDir($)
+  if (!dir) return false
+  const file = `${dir}/claude-plugin.json`
+  try {
+    await $.process.run(['mkdir', '-p', '-m', '700', dir])
+    // Create it user-only before the key is written, then make sure it stayed so.
+    await $.process.run(['sh', '-c', 'umask 077; : >> "$1"', 'sh', file])
+    await $.process.run(['chmod', '600', file])
+    await $.fs.write(file, JSON.stringify({ key }))
+    await $.process.run(['chmod', '600', file])
+    return true
+  } catch {
+    return false
+  }
+}
+
+// (moved from client.ts)
+async function forgetKey($: Engine): Promise<void> {
+  const dir = await keyDir($)
+  if (!dir) return
+  try {
+    await $.process.run(['rm', '-f', `${dir}/claude-plugin.json`])
+  } catch {
+    // Nothing to forget.
+  }
+}
+
+// ── authenticated requests ──
+
+// (moved from client.ts)
+// A gate refusal seen on any keyed reply, until the plugin's loop takes it.
+let pendingGate: Gate | null = null
+
+// (moved from client.ts)
+/** The latest gate refusal from a keyed reply, once. */
+function takeGate(): Gate | null {
+  const g = pendingGate
+  pendingGate = null
+  return g
+}
+
+// (moved from client.ts)
+/** Asks HiveOp (no key) whether this version may run. null = yes or unreachable (fail open). */
+async function checkGate($: Engine): Promise<Gate | null> {
+  try {
+    const q = `kind=${encodeURIComponent(CLIENT_KIND)}&version=${encodeURIComponent(CLIENT_VERSION)}`
+    const res = await $.http.fetch(`${await apiBase($)}/client-gate?${q}`, { method: 'GET', headers: headers() })
+    const body = parse(res.text)
+    if (!res.ok || !body) return null
+    const message = typeof body.message === 'string' && body.message.trim() ? body.message.trim().slice(0, 140) : null
+    if (body.state === 'update') return { why: 'update', message }
+    if (body.state === 'off') return { why: 'paused', message }
+    return null
+  } catch {
+    return null
+  }
+}
+
+// (moved from client.ts)
+/** `agent`: act as this window's own adopted agent (hcp-17); HiveOp checks it is ours, online and in that workspace. */
+async function hiveop($: Engine, path: string, init: { method?: string; body?: unknown; agent?: string } = {}): Promise<Fetched | null> {
+  const key = await loadKey($)
+  if (!key) return null
+  try {
+    const h = headers(key)
+    if (init.agent) h['X-HiveOp-Agent'] = init.agent
+    const res = await $.http.fetch(`${await apiBase($)}${path}`, {
+      method: init.method ?? 'GET',
+      headers: h,
+      body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    })
+    const body = parse(res.text)
+    const gate = gateOf(res.status, body)
+    if (gate) pendingGate = gate
+    return { ok: res.ok, status: res.status, body, retryAfterSec: retryAfter(res.headers) }
+  } catch {
+    return { ok: false, status: 0, body: null, retryAfterSec: null }
+  }
+}
+
+// (moved from client.ts)
+async function fetchMe($: Engine): Promise<Me> {
+  const r = await hiveop($, '/me/hive/profile')
+  if (!r || r.status === 0) return { state: 'unreachable' }
+  if (r.status === 401 || r.status === 403) return { state: 'rejected' }
+  if (!r.ok) return { state: 'unreachable' }
+  const profile = r.body?.profile as { displayName?: unknown; walletPubkey?: unknown } | undefined
+  const name = typeof profile?.displayName === 'string' && profile.displayName.trim() ? profile.displayName.trim() : null
+  const wallet = typeof profile?.walletPubkey === 'string' && profile.walletPubkey ? profile.walletPubkey : null
+  return { state: 'ok', name, wallet }
+}
+
+// (moved from client.ts)
+/**
+ * One person's 64px photo as base64 PNG bytes, or null (no photo, not visible, blocked, offline).
+ * The host's fetch is text-only, so the server sends base64 text (?encoding=base64).
+ */
+async function fetchAvatar($: Engine, wallet: string): Promise<string | null> {
+  const key = await loadKey($)
+  if (!key) return null
+  try {
+    const res = await $.http.fetch(`${await apiBase($)}/users/${encodeURIComponent(wallet)}/avatar.png?encoding=base64`, { headers: headers(key) })
+    const text = res.text.trim()
+    return res.ok && text.length > 0 && text.length <= 60_000 && /^[A-Za-z0-9+/]+=*$/.test(text) ? text : null
+  } catch {
+    return null
+  }
+}
+
+// ── workspaces and people (hcp-10) ──
+
+// (moved from client.ts)
+async function listMine($: Engine): Promise<{ rows: WsRow[] } | { fail: Fetched | null }> {
+  const r = await hiveop($, '/workspaces')
+  if (!r || !r.ok) return { fail: r }
+  const list = Array.isArray(r.body?.workspaces) ? (r.body!.workspaces as unknown[]) : []
+  return { rows: list.map(wsRow).filter((x): x is WsRow => x !== null) }
+}
+
+// (moved from client.ts)
+async function listInvites($: Engine): Promise<{ rows: InviteRow[] } | { fail: Fetched | null }> {
+  const r = await hiveop($, '/me/invites')
+  if (!r || !r.ok) return { fail: r }
+  const list = Array.isArray(r.body?.invites) ? (r.body!.invites as Array<Record<string, unknown>>) : []
+  const rows: InviteRow[] = []
+  for (const x of list) {
+    const inv = (x.invite && typeof x.invite === 'object' ? x.invite : {}) as Record<string, unknown>
+    const ws = (x.workspace && typeof x.workspace === 'object' ? x.workspace : {}) as Record<string, unknown>
+    if (s(inv.id) && s(inv.token)) rows.push({ id: s(inv.id), token: s(inv.token), wsId: s(ws.id), wsName: s(ws.name).trim() || 'workspace' })
+  }
+  return { rows }
+}
+
+// (moved from client.ts)
+async function acceptInvite($: Engine, token: string): Promise<Fetched | null> {
+  return hiveop($, `/workspaces/invites/${encodeURIComponent(token)}/redeem`, { method: 'POST' })
+}
+
+// (moved from client.ts)
+async function declineInvite($: Engine, inviteId: string): Promise<Fetched | null> {
+  return hiveop($, '/me/invites/decline', { method: 'POST', body: { inviteId } })
+}
+
+// (moved from client.ts)
+async function listExplore(
+  $: Engine,
+  search: string,
+  offset: number,
+  limit: number,
+): Promise<{ rows: WsRow[]; total: number } | { fail: Fetched | null }> {
+  const q = `limit=${limit}&offset=${offset}${search ? `&search=${encodeURIComponent(search)}` : ''}`
+  const r = await hiveop($, `/workspaces/explore?${q}`)
+  if (!r || !r.ok) return { fail: r }
+  const list = Array.isArray(r.body?.workspaces) ? (r.body!.workspaces as unknown[]) : []
+  const rows = list.map(wsRow).filter((x): x is WsRow => x !== null)
+  return { rows, total: typeof r.body?.total === 'number' ? r.body.total : offset + rows.length }
+}
+
+// (moved from client.ts)
+/** Open join. Resolves with the server's reply; `visiting` when the join is a visit, not a membership. */
+async function joinWorkspace($: Engine, id: string): Promise<Fetched | null> {
+  return hiveop($, `/workspaces/${encodeURIComponent(id)}/join`, { method: 'POST' })
+}
+
+// (moved from client.ts)
+async function requestToJoin($: Engine, id: string): Promise<Fetched | null> {
+  return hiveop($, `/workspaces/${encodeURIComponent(id)}/join-requests`, { method: 'POST', body: {} })
+}
+
+// (moved from client.ts)
+async function listPilots($: Engine, query: string, offset: number, limit: number): Promise<{ rows: PilotRow[] } | { fail: Fetched | null }> {
+  const q = `limit=${limit}&offset=${offset}${query ? `&query=${encodeURIComponent(query)}` : ''}`
+  const r = await hiveop($, `/pilots?${q}`)
+  if (!r || !r.ok) return { fail: r }
+  const list = Array.isArray(r.body?.pilots) ? (r.body!.pilots as Array<Record<string, unknown>>) : []
+  return { rows: list.filter((p) => s(p.wallet) && s(p.displayName)).map((p) => ({ wallet: s(p.wallet), name: s(p.displayName).trim() })) }
+}
+
+// (moved from client.ts)
+async function followingAmong($: Engine, wallets: string[]): Promise<string[] | null> {
+  if (wallets.length === 0) return []
+  const r = await hiveop($, '/me/following/among', { method: 'POST', body: { wallets } })
+  if (!r || !r.ok || !Array.isArray(r.body?.following)) return null
+  return (r.body!.following as unknown[]).filter((w): w is string => typeof w === 'string')
+}
+
+// (moved from client.ts)
+async function setFollow($: Engine, wallet: string, on: boolean): Promise<Fetched | null> {
+  return hiveop($, `/users/${encodeURIComponent(wallet)}/follow`, { method: on ? 'POST' : 'DELETE' })
+}
+
+// ── work (hcp-11) ──
+
+// (moved from client.ts)
+async function fetchWorkSummary($: Engine, wsId: string): Promise<{ summary: WorkSummary } | { fail: Fetched | null }> {
+  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/work-summary`)
+  if (!r || !r.ok || !r.body) return { fail: r }
+  const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0)
+  const nx = r.body.next as { id?: unknown; title?: unknown } | null | undefined
+  const next = nx && s(nx.id) ? { id: s(nx.id), title: s(nx.title).trim() || 'untitled' } : null
+  return { summary: { ready: n(r.body.ready), inProgress: n(r.body.inProgress), next } }
+}
+
+// (moved from client.ts)
+/** Claim as the person, or as this window's adopted agent when `agent` is given (hcp-17). The server's words come back in `refusal`. */
+async function claimIssue($: Engine, wsId: string, issueId: string, agent?: string): Promise<Fetched | null> {
+  return hiveop($, `/workspaces/${encodeURIComponent(wsId)}/issues/${encodeURIComponent(issueId)}/claim`, { method: 'POST', agent })
+}
+
+// ── hcp-17: work tools for the model, pinned to the seat ──
+
+// (moved from client.ts)
+/** Ready items in the seat's workspace, best first. */
+async function listReady($: Engine, wsId: string, agent: string): Promise<{ items: WorkItem[] } | { fail: Fetched | null }> {
+  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/issues/ready`, { agent })
+  if (!r || !r.ok || !r.body) return { fail: r }
+  const list = Array.isArray(r.body.issues) ? r.body.issues : []
+  return { items: list.map(toItem).filter((i): i is WorkItem => i !== null) }
+}
+
+// (moved from client.ts)
+async function getIssue($: Engine, wsId: string, issueId: string, agent: string): Promise<WorkItem | null> {
+  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/issues/${encodeURIComponent(issueId)}`, { agent })
+  return r && r.ok && r.body ? toItem(r.body.issue) : null
+}
+
+// (moved from client.ts)
+/** Finish: HiveOp verifies this agent's claimed item (its linked PR) and, on a pass, submits it and claims the next. */
+async function finishWork($: Engine, wsId: string, agent: string): Promise<Fetched | null> {
+  return hiveop($, `/workspaces/${encodeURIComponent(wsId)}/verification/run`, { method: 'POST', body: {}, agent })
+}
+
+// ── adopted sessions (hcp-15) ──
+
+// (moved from client.ts)
+/** The folder's `origin` remote, or null when it has none. Never logged: it can carry a name. */
+async function gitRemote($: Engine, cwd: string): Promise<string | null> {
+  try {
+    const r = await $.process.run(['git', 'remote', 'get-url', 'origin'], { cwd })
+    const url = r.stdout.trim()
+    return r.exitCode === 0 && url ? url : null
+  } catch {
+    return null
+  }
+}
+
+// (moved from client.ts)
+async function matchWorkspaces($: Engine, remote: string): Promise<Matched | null> {
+  const r = await hiveop($, `/me/workspaces/match?remote=${encodeURIComponent(remote)}`)
+  if (!r || !r.ok || !r.body) return null
+  const rows = (v: unknown): Array<{ id: string; name: string }> =>
+    Array.isArray(v)
+      ? (v as Array<Record<string, unknown>>).filter((x) => s(x?.id)).map((x) => ({ id: s(x.id), name: s(x.name).trim() || 'workspace' }))
+      : []
+  return { mine: rows(r.body.mine), joinable: rows(r.body.joinable) }
+}
+
+// (moved from client.ts)
+async function adoptSession($: Engine, wsId: string, folder: string, session: string): Promise<{ seat: Adopted } | { fail: Fetched | null }> {
+  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/adopted-sessions`, { method: 'POST', body: { folderKey: folder, sessionKey: session } })
+  if (!r || !r.ok || !r.body || !s(r.body.agentId)) return { fail: r }
+  return { seat: { agentId: s(r.body.agentId), name: s(r.body.name).trim() || 'Claude Code', resumed: r.body.resumed === true } }
+}
+
+// (moved from client.ts)
+async function leaveSession($: Engine, wsId: string, agentId: string): Promise<Fetched | null> {
+  return hiveop($, `/workspaces/${encodeURIComponent(wsId)}/adopted-sessions/${encodeURIComponent(agentId)}/offline`, { method: 'POST' })
+}
+
+// ── cloud agents (hcp-25) ──
+
+// (moved from client.ts)
+/** File a cloud-run request (create, or wake when `agentId` is given). Nothing starts until the browser approves. */
+async function fileCloudRun($: Engine, wsId: string, agentId?: string): Promise<{ id: string; expiresAt: string } | { fail: Fetched | null }> {
+  const body: Record<string, string> = { kind: 'cloud_run', workspaceId: wsId }
+  if (agentId) body.agentId = agentId
+  const r = await hiveop($, '/me/plugin-approvals', { method: 'POST', body })
+  const a = r?.body?.approval as { id?: unknown; expiresAt?: unknown } | undefined
+  if (!r || !r.ok || !a || !s(a.id)) return { fail: r }
+  return { id: s(a.id), expiresAt: s(a.expiresAt) }
+}
+
+// (moved from client.ts)
+async function pollApproval($: Engine, id: string): Promise<{ state: ApprovalState } | { state: 'unreachable' }> {
+  const r = await hiveop($, `/me/plugin-approvals/${encodeURIComponent(id)}`)
+  const st = (r?.body?.approval as { state?: unknown } | undefined)?.state
+  if (r?.ok && (st === 'pending' || st === 'approved' || st === 'denied' || st === 'expired')) return { state: st }
+  return { state: 'unreachable' }
+}
+
+// ── repo access for HiveOp cloud repos (hcp-26) ──
+
+// (moved from client.ts)
+/** Whether this key holds an approved repo grant. `revoked`: the key or grant is gone. Never carries a credential. */
+async function repoAccess($: Engine): Promise<'granted' | 'none' | 'revoked' | 'unreachable'> {
+  const r = await hiveop($, '/me/repo-access')
+  if (!r || r.status === 0) return 'unreachable'
+  if (r.status === 401 || r.status === 403) return 'revoked'
+  if (!r.ok) return 'unreachable'
+  return r.body?.granted === true ? 'granted' : 'none'
+}
+
+// (moved from client.ts)
+/** File a repo-access request. Nothing is granted until the browser approves. */
+async function fileRepoAccess($: Engine): Promise<{ id: string; expiresAt: string } | { fail: Fetched | null }> {
+  const r = await hiveop($, '/me/plugin-approvals', { method: 'POST', body: { kind: 'repo_access' } })
+  const a = r?.body?.approval as { id?: unknown; expiresAt?: unknown } | undefined
+  if (!r || !r.ok || !a || !s(a.id)) return { fail: r }
+  return { id: s(a.id), expiresAt: s(a.expiresAt) }
+}
+
+// (moved from client.ts)
+/** The person's own cloud agents in one workspace; null when it could not be read. */
+async function listCloudAgents($: Engine, wsId: string): Promise<CloudAgent[] | null> {
+  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/cloud-agents`)
+  if (!r || !r.ok || !Array.isArray(r.body?.agents)) return null
+  return (r.body!.agents as Array<Record<string, unknown>>)
+    .filter((a) => s(a?.id))
+    .map((a) => ({
+      id: s(a.id),
+      name: s(a.name).trim() || 'Claude',
+      state: s(a.state) || 'asleep',
+      creditsPerHour: typeof a.creditsPerHour === 'number' && Number.isFinite(a.creditsPerHour) ? a.creditsPerHour : 0,
+    }))
+}
+
+// (moved from client.ts)
+/** Stopping spend never needs approval. */
+async function sleepCloudAgent($: Engine, agentId: string): Promise<Fetched | null> {
+  return hiveop($, `/me/cloud-agents/${encodeURIComponent(agentId)}/sleep`, { method: 'POST' })
+}
+
+// (moved from client.ts)
+/** Opens a page in the browser; false when the computer would not. */
+async function openInBrowser($: Engine, url: string): Promise<boolean> {
+  try {
+    const r = await $.process.run(['open', url])
+    return r.exitCode === 0
+  } catch {
+    return false
+  }
+}
+
+// (moved from launch.ts)
+async function readMap($: Engine, key: string): Promise<Record<string, unknown>> {
+  try {
+    const v = await $.store.get(key)
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
+// (moved from launch.ts)
+/** Remember that this folder is the clone of `remote`. */
+async function rememberClone($: Engine, remote: string, dir: string): Promise<void> {
+  const k = normRemote(remote)
+  if (!k || !dir || hasControl(dir)) return
+  const map = await readMap($, STORE_CLONES)
+  if (map[k] === dir) return
+  await $.store.set(STORE_CLONES, { ...map, [k]: dir })
+}
+
+// (moved from launch.ts)
+async function originOf($: Engine, dir: string): Promise<string> {
+  try {
+    const r = await $.process.run(['git', '-C', dir, 'remote', 'get-url', 'origin'], { timeoutMs: 5000 })
+    return r.exitCode === 0 ? normRemote(r.stdout) : ''
+  } catch {
+    return ''
+  }
+}
+
+// (moved from launch.ts)
+async function subfolders($: Engine, parent: string): Promise<string[]> {
+  try {
+    const entries = await $.fs.list(parent)
+    return entries
+      .filter((e) => e.kind === 'dir' && !e.name.startsWith('.') && !hasControl(e.name))
+      .map((e) => `${parent.replace(/\/+$/, '')}/${e.name}`)
+      .slice(0, SCAN_CAP)
+  } catch {
+    return []
+  }
+}
+
+// (moved from launch.ts)
+/**
+ * Every clone this computer is known to hold: remote → folder. Looks in folders
+ * remembered from earlier joins, ~/HiveOp/*, and the session folder's siblings,
+ * and trusts only what `git remote get-url origin` says.
+ */
+async function scanClones($: Engine, cwd: string, home: string): Promise<Record<string, string>> {
+  const remembered = await readMap($, STORE_CLONES)
+  const candidates: string[] = []
+  for (const d of Object.values(remembered)) if (typeof d === 'string') candidates.push(d)
+  if (home) candidates.push(...(await subfolders($, `${home}/HiveOp`)))
+  const parent = cwd.replace(/\/+$/, '').replace(/\/[^/]*$/, '')
+  if (parent && parent !== cwd) candidates.push(...(await subfolders($, parent)))
+  if (cwd) candidates.push(cwd)
+  const found: Record<string, string> = {}
+  const seen = new Set<string>()
+  for (const dir of candidates) {
+    if (seen.has(dir) || hasControl(dir) || !dir.startsWith('/')) continue
+    seen.add(dir)
+    const k = await originOf($, dir)
+    if (k && !found[k]) found[k] = dir
+  }
+  return found
+}
+
+// ── join on open: a one-shot note to the session about to start ──
+
+// (moved from launch.ts)
+async function writeJoinOnOpen($: Engine, folderKey: string, workspaceId: string): Promise<void> {
+  const now = await $.clock.now()
+  const map = await readMap($, STORE_OPEN)
+  const live: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(map)) {
+    const exp = (v as { exp?: unknown } | null)?.exp
+    if (typeof exp === 'number' && exp > now) live[k] = v
+  }
+  live[folderKey] = { ws: workspaceId, exp: now + OPEN_TTL_MS }
+  await $.store.set(STORE_OPEN, live)
+}
+
+// (moved from launch.ts)
+/** The workspace this folder was opened to join, if the note is fresh. Always removes the folder's note. */
+async function takeJoinOnOpen($: Engine, folderKey: string): Promise<string | null> {
+  const map = await readMap($, STORE_OPEN)
+  const rec = map[folderKey] as { ws?: unknown; exp?: unknown } | undefined
+  if (!rec) return null
+  const { [folderKey]: _gone, ...rest } = map
+  await $.store.set(STORE_OPEN, rest)
+  const now = await $.clock.now()
+  return typeof rec.ws === 'string' && typeof rec.exp === 'number' && rec.exp > now ? rec.ws : null
+}
+
+// ── open ──
+
+// (moved from launch.ts)
+/** Open Claude Code in `dir` in a new terminal tab, or hand back the command to copy. */
+async function openFolder($: Engine, dir: string, pluginDir: string | null, canLaunch: boolean): Promise<Opened> {
+  const command = claudeCommand(dir, pluginDir)
+  if (!canLaunch || hasControl(dir)) return { ok: false, command }
+  const term = (await $.env.get('TERM_PROGRAM')) ?? ''
+  const argv = launchArgv(term, dir, pluginDir)
+  if (!argv) return { ok: false, command }
+  try {
+    const r = await $.process.run(argv, { timeoutMs: 8000 })
+    return r.exitCode === 0 ? { ok: true } : { ok: false, command }
+  } catch {
+    return { ok: false, command }
+  }
+}
+
+// ── get code (hcp-23): clone with the person's own git access; HiveOp mints nothing ──
+
+// (moved from launch.ts)
+/** ~/HiveOp/<slug>, then -2, -3 ... when that folder is another repo. A folder that already is this repo is found. */
+async function chooseCloneFolder($: Engine, home: string, name: string, repoUrl: string): Promise<CloneTarget> {
+  const want = normRemote(repoUrl)
+  const base = `${home.replace(/\/+$/, '')}/HiveOp/${slugify(name)}`
+  for (let n = 1; n < 100; n++) {
+    const dir = n === 1 ? base : `${base}-${n}`
+    try {
+      await $.fs.list(dir)
+    } catch {
+      return { dir, existing: false }
+    }
+    if ((await originOf($, dir)) === want) return { dir, existing: true }
+  }
+  return { dir: `${base}-${Date.now()}`, existing: false }
+}
+
+// (moved from launch.ts)
+/** Pin the helper into the clone's own config, so pull and push use it the same way. Nothing secret is written. */
+async function pinHelper($: Engine, dir: string, origin: string, helper: string): Promise<boolean> {
+  try {
+    const key = `credential.${origin}.helper`
+    const a = await $.process.run(['git', '-C', dir, 'config', '--local', '--add', key, ''], { timeoutMs: 5000 })
+    const b = await $.process.run(['git', '-C', dir, 'config', '--local', '--add', key, helper], { timeoutMs: 5000 })
+    return a.exitCode === 0 && b.exitCode === 0
+  } catch {
+    return false
+  }
+}
+
+// (moved from launch.ts)
+/**
+ * git clone --progress into `dir`; `onPercent` hears each step. Failure comes back as one safe line.
+ * With a `helper` (HiveOp cloud repos) git gets its credential from that helper: the address stays plain.
+ */
+async function cloneRepo($: Engine, repoUrl: string, dir: string, onPercent: (n: number) => void, helper?: { origin: string; value: string }): Promise<Cloned> {
+  if (!cloneableUrl(repoUrl) || hasControl(dir)) return { ok: false, reason: 'Clone failed.' }
+  if (helper && (!helper.origin || !helper.value || httpsOrigin(repoUrl) !== helper.origin)) return { ok: false, reason: 'Clone failed.' }
+  let tail = ''
+  try {
+    const pre = helper ? helperFlags(helper.origin, helper.value) : []
+    const run = $.process.spawn({ argv: ['git', ...pre, 'clone', '--progress', '--', repoUrl.trim(), dir], env: { GIT_TERMINAL_PROMPT: '0' } })
+    let code: number | null = null
+    while (true) {
+      const step = await run.next()
+      if (step.done) {
+        code = step.value.code
+        break
+      }
+      if (step.value.stream !== 'stderr') continue
+      tail = (tail + step.value.text).slice(-2000)
+      const p = lastPercent(step.value.text)
+      if (p !== null) onPercent(p)
+    }
+    return code === 0 ? { ok: true } : { ok: false, reason: cloneFailureLine(tail) }
+  } catch {
+    return { ok: false, reason: 'Clone failed.' }
+  }
+}
+
+// (moved from launch.ts)
+/**
+ * Local workspaces on this computer: the HiveOp bridge's own map
+ * (~/.wen-market/local-workspaces.json, folder → workspace). Workspace id → folder.
+ * Missing, unreadable or unknown-shaped file: none. Paths stay on this machine.
+ */
+async function readLocalFolders($: Engine, home: string): Promise<Record<string, string>> {
+  if (!home) return {}
+  let raw: unknown
+  try {
+    raw = JSON.parse(String(await $.fs.read(`${home}/.wen-market/local-workspaces.json`)))
+  } catch {
+    return {}
+  }
+  const r = raw as { v?: unknown; entries?: unknown }
+  if (!r || r.v !== 1 || !r.entries || typeof r.entries !== 'object' || Array.isArray(r.entries)) return {}
+  const out: Record<string, string> = {}
+  for (const [folder, e] of Object.entries(r.entries as Record<string, unknown>)) {
+    const id = (e as { workspaceId?: unknown } | null)?.workspaceId
+    const dir = folder.replace(/\/+$/, '')
+    if (typeof id !== 'string' || !id || !dir.startsWith('/') || hasControl(dir) || hasControl(id)) continue
+    out[id] = dir
+  }
+  return out
+}
+
 
 const EMPTY_CHAT: ChatView = {
   workspace: null,

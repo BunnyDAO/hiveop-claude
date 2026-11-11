@@ -100,6 +100,44 @@ HiveOp can ask for a newer plugin, or pause the plugin. The band then says
 and the plugin stops asking HiveOp for anything until it's allowed again. It
 checks back every 15 minutes, or when you press **Check again**. Your sign-in is kept.
 
+## What the plugin runs, reads and writes
+
+Programs it starts (fixed commands, run as you; the server never chooses a
+program or its arguments, except that Get code clones the workspace's https
+repository address that HiveOp gives):
+
+- `hostname`: once at sign-in, for the device label HiveOp shows.
+- `mkdir -m 700`, `sh -c 'umask 077; : >> file'`, `chmod 600`: create the key
+  file readable by you only. `rm -f` deletes it at sign out.
+- `git remote get-url origin`: to match this folder to a HiveOp workspace.
+- `git clone` and `git config --local credential.helper`: only when you press
+  **Get code**; the helper is `bin/hiveop-git-credential`, which calls
+  `curl` to `api.wenrwa.com` for a 15-minute git token (it downloads and runs
+  nothing else).
+- `open <link>`: opens a HiveOp page in your browser when you press a button.
+- To open a workspace folder in a new terminal tab when you press **Open**:
+  `osascript` (Terminal or iTerm), `open -na Ghostty`, `wezterm cli spawn` or
+  `kitten @ launch`, each starting `claude` in that folder.
+
+What it reads: the environment variables `HOME`, `HIVEOP_API_URL` and
+`TERM_PROGRAM`; its own key file `~/.hiveop/claude-plugin.json` (the only
+credential it uses, which it created at sign in); and
+`~/.wen-market/local-workspaces.json`, written by the HiveOp desktop bridge, to
+find folders you linked in the app.
+
+What it writes: the key file above, its own plugin store (your view, tabs and
+clone folder map), and, on **Get code**, the new clone and its `.git/config`.
+
+Hooks: `tool.call` refuses any tool call that would read the key file, and,
+while a window is joined, reports the file paths it touches inside this folder
+(see Join as agent). It answers only its own three work tools
+(`mcp__hiveop__next_work`, `claim_work`, `finish_work`) itself. `prompt.compose`
+adds one line telling the model its HiveOp seat (workspace, agent name, claimed
+item); it changes nothing else. `turn.start`, `turn.complete` and `session.end`
+report working, idle and offline for a joined window.
+
+The HiveOp mark in `hooks/logo.ts` is a 64px PNG image, kept as base64 text.
+
 ## Data and privacy
 
 Everything here happens only after you sign in, and only on HiveOp's own

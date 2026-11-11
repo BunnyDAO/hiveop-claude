@@ -7,11 +7,15 @@ import type { CloudAgent, InviteRow, PilotRow, WsRow } from '../types'
 // Nothing here returns, logs or throws the key.
 
 export const CLIENT_KIND = 'claude-code-plugin'
-export const CLIENT_VERSION = '0.2.0'
-const DEFAULT_API = 'https://api.wenrwa.com/api/v1'
-const APPROVAL_PAGE = 'https://app.hiveop.io/claude-code'
+
+export const CLIENT_VERSION = '0.2.1'
+
+export const DEFAULT_API = 'https://api.wenrwa.com/api/v1'
+
+export const APPROVAL_PAGE = 'https://app.hiveop.io/claude-code'
 
 export type Pairing = { code: string; pollToken: string; expiresAt: string; link: string }
+
 export type PollOutcome =
   | { status: 'pending' }
   | { status: 'approved'; key: string }
@@ -19,12 +23,7 @@ export type PollOutcome =
   | { status: 'expired' }
   | { status: 'unreachable' }
 
-export async function apiBase($: Engine): Promise<string> {
-  const fromEnv = await $.env.get('HIVEOP_API_URL')
-  return (fromEnv && /^https?:\/\//.test(fromEnv) ? fromEnv : DEFAULT_API).replace(/\/+$/, '')
-}
-
-function headers(key?: string): Record<string, string> {
+export function headers(key?: string): Record<string, string> {
   const h: Record<string, string> = {
     'Content-Type': 'application/json',
     'X-HiveOp-Client': CLIENT_KIND,
@@ -34,7 +33,7 @@ function headers(key?: string): Record<string, string> {
   return h
 }
 
-function parse(text: string): Record<string, unknown> | null {
+export function parse(text: string): Record<string, unknown> | null {
   try {
     const v = JSON.parse(text)
     return v && typeof v === 'object' ? (v as Record<string, unknown>) : null
@@ -43,107 +42,9 @@ function parse(text: string): Record<string, unknown> | null {
   }
 }
 
-export async function computerName($: Engine): Promise<string> {
-  try {
-    const r = await $.process.run(['hostname'])
-    const name = r.stdout.trim().replace(/\.local$/, '').slice(0, 80)
-    return name || 'this computer'
-  } catch {
-    return 'this computer'
-  }
-}
-
-export async function startPairing($: Engine, computer: string): Promise<Pairing | null> {
-  try {
-    const res = await $.http.fetch(`${await apiBase($)}/pairing/codes`, {
-      method: 'POST',
-      headers: headers(),
-      body: JSON.stringify({ deviceLabel: computer, purpose: 'plugin' }),
-    })
-    const body = parse(res.text)
-    if (!res.ok || !body || typeof body.code !== 'string' || typeof body.pollToken !== 'string') return null
-    return {
-      code: body.code,
-      pollToken: body.pollToken,
-      expiresAt: String(body.expiresAt ?? ''),
-      link: `${APPROVAL_PAGE}?code=${encodeURIComponent(body.code)}`,
-    }
-  } catch {
-    return null
-  }
-}
-
-export async function pollPairing($: Engine, pollToken: string): Promise<PollOutcome> {
-  try {
-    const res = await $.http.fetch(`${await apiBase($)}/pairing/poll`, {
-      method: 'POST',
-      headers: headers(),
-      body: JSON.stringify({ pollToken }),
-    })
-    const body = parse(res.text)
-    if (!res.ok || !body) return { status: 'unreachable' }
-    if (body.status === 'approved' && typeof body.connectToken === 'string') {
-      return { status: 'approved', key: body.connectToken }
-    }
-    if (body.status === 'denied') return { status: 'denied', reason: body.reason === 'not_open' ? 'not-open' : 'denied' }
-    if (body.status === 'expired') return { status: 'expired' }
-    if (body.status === 'pending') return { status: 'pending' }
-    return { status: 'unreachable' }
-  } catch {
-    return { status: 'unreachable' }
-  }
-}
-
-// ── key storage: one user-only file under the home folder ──
-
-async function keyDir($: Engine): Promise<string | null> {
-  const home = await $.env.get('HOME')
-  return home ? `${home}/.hiveop` : null
-}
-
-export async function loadKey($: Engine): Promise<string | null> {
-  const dir = await keyDir($)
-  if (!dir) return null
-  try {
-    const body = parse((await $.fs.read(`${dir}/claude-plugin.json`)) as string)
-    return typeof body?.key === 'string' && body.key ? body.key : null
-  } catch {
-    return null
-  }
-}
-
-export async function saveKey($: Engine, key: string): Promise<boolean> {
-  const dir = await keyDir($)
-  if (!dir) return false
-  const file = `${dir}/claude-plugin.json`
-  try {
-    await $.process.run(['mkdir', '-p', '-m', '700', dir])
-    // Create it user-only before the key is written, then make sure it stayed so.
-    await $.process.run(['sh', '-c', 'umask 077; : >> "$1"', 'sh', file])
-    await $.process.run(['chmod', '600', file])
-    await $.fs.write(file, JSON.stringify({ key }))
-    await $.process.run(['chmod', '600', file])
-    return true
-  } catch {
-    return false
-  }
-}
-
-export async function forgetKey($: Engine): Promise<void> {
-  const dir = await keyDir($)
-  if (!dir) return
-  try {
-    await $.process.run(['rm', '-f', `${dir}/claude-plugin.json`])
-  } catch {
-    // Nothing to forget.
-  }
-}
-
-// ── authenticated requests ──
-
 export type Fetched = { ok: boolean; status: number; body: Record<string, unknown> | null; retryAfterSec: number | null }
 
-function retryAfter(h: Record<string, string> | undefined): number | null {
+export function retryAfter(h: Record<string, string> | undefined): number | null {
   if (!h) return null
   for (const k of Object.keys(h)) {
     if (k.toLowerCase() === 'retry-after') {
@@ -168,86 +69,10 @@ export function gateOf(status: number, body: Record<string, unknown> | null): Ga
   return null
 }
 
-// A gate refusal seen on any keyed reply, until the plugin's loop takes it.
-let pendingGate: Gate | null = null
-/** The latest gate refusal from a keyed reply, once. */
-export function takeGate(): Gate | null {
-  const g = pendingGate
-  pendingGate = null
-  return g
-}
-
-/** Asks HiveOp (no key) whether this version may run. null = yes or unreachable (fail open). */
-export async function checkGate($: Engine): Promise<Gate | null> {
-  try {
-    const q = `kind=${encodeURIComponent(CLIENT_KIND)}&version=${encodeURIComponent(CLIENT_VERSION)}`
-    const res = await $.http.fetch(`${await apiBase($)}/client-gate?${q}`, { method: 'GET', headers: headers() })
-    const body = parse(res.text)
-    if (!res.ok || !body) return null
-    const message = typeof body.message === 'string' && body.message.trim() ? body.message.trim().slice(0, 140) : null
-    if (body.state === 'update') return { why: 'update', message }
-    if (body.state === 'off') return { why: 'paused', message }
-    return null
-  } catch {
-    return null
-  }
-}
-
-/** `agent`: act as this window's own adopted agent (hcp-17); HiveOp checks it is ours, online and in that workspace. */
-export async function hiveop($: Engine, path: string, init: { method?: string; body?: unknown; agent?: string } = {}): Promise<Fetched | null> {
-  const key = await loadKey($)
-  if (!key) return null
-  try {
-    const h = headers(key)
-    if (init.agent) h['X-HiveOp-Agent'] = init.agent
-    const res = await $.http.fetch(`${await apiBase($)}${path}`, {
-      method: init.method ?? 'GET',
-      headers: h,
-      body: init.body === undefined ? undefined : JSON.stringify(init.body),
-    })
-    const body = parse(res.text)
-    const gate = gateOf(res.status, body)
-    if (gate) pendingGate = gate
-    return { ok: res.ok, status: res.status, body, retryAfterSec: retryAfter(res.headers) }
-  } catch {
-    return { ok: false, status: 0, body: null, retryAfterSec: null }
-  }
-}
-
 /** The signed-in person's display name; null when they have none. */
 export type Me = { state: 'ok'; name: string | null; wallet: string | null } | { state: 'rejected' } | { state: 'unreachable' }
 
-export async function fetchMe($: Engine): Promise<Me> {
-  const r = await hiveop($, '/me/hive/profile')
-  if (!r || r.status === 0) return { state: 'unreachable' }
-  if (r.status === 401 || r.status === 403) return { state: 'rejected' }
-  if (!r.ok) return { state: 'unreachable' }
-  const profile = r.body?.profile as { displayName?: unknown; walletPubkey?: unknown } | undefined
-  const name = typeof profile?.displayName === 'string' && profile.displayName.trim() ? profile.displayName.trim() : null
-  const wallet = typeof profile?.walletPubkey === 'string' && profile.walletPubkey ? profile.walletPubkey : null
-  return { state: 'ok', name, wallet }
-}
-
-/**
- * One person's 64px photo as base64 PNG bytes, or null (no photo, not visible, blocked, offline).
- * The host's fetch is text-only, so the server sends base64 text (?encoding=base64).
- */
-export async function fetchAvatar($: Engine, wallet: string): Promise<string | null> {
-  const key = await loadKey($)
-  if (!key) return null
-  try {
-    const res = await $.http.fetch(`${await apiBase($)}/users/${encodeURIComponent(wallet)}/avatar.png?encoding=base64`, { headers: headers(key) })
-    const text = res.text.trim()
-    return res.ok && text.length > 0 && text.length <= 60_000 && /^[A-Za-z0-9+/]+=*$/.test(text) ? text : null
-  } catch {
-    return null
-  }
-}
-
-// ── workspaces and people (hcp-10) ──
-
-
-function s(v: unknown): string {
+export function s(v: unknown): string {
   return typeof v === 'string' ? v : ''
 }
 
@@ -263,7 +88,7 @@ export function refusal(r: Fetched | null): string {
   return 'That did not work. Try again.'
 }
 
-function wsRow(raw: unknown): WsRow | null {
+export function wsRow(raw: unknown): WsRow | null {
   if (!raw || typeof raw !== 'object') return null
   const w = raw as Record<string, unknown>
   const id = s(w.id)
@@ -279,99 +104,11 @@ function wsRow(raw: unknown): WsRow | null {
   }
 }
 
-export async function listMine($: Engine): Promise<{ rows: WsRow[] } | { fail: Fetched | null }> {
-  const r = await hiveop($, '/workspaces')
-  if (!r || !r.ok) return { fail: r }
-  const list = Array.isArray(r.body?.workspaces) ? (r.body!.workspaces as unknown[]) : []
-  return { rows: list.map(wsRow).filter((x): x is WsRow => x !== null) }
-}
-
-export async function listInvites($: Engine): Promise<{ rows: InviteRow[] } | { fail: Fetched | null }> {
-  const r = await hiveop($, '/me/invites')
-  if (!r || !r.ok) return { fail: r }
-  const list = Array.isArray(r.body?.invites) ? (r.body!.invites as Array<Record<string, unknown>>) : []
-  const rows: InviteRow[] = []
-  for (const x of list) {
-    const inv = (x.invite && typeof x.invite === 'object' ? x.invite : {}) as Record<string, unknown>
-    const ws = (x.workspace && typeof x.workspace === 'object' ? x.workspace : {}) as Record<string, unknown>
-    if (s(inv.id) && s(inv.token)) rows.push({ id: s(inv.id), token: s(inv.token), wsId: s(ws.id), wsName: s(ws.name).trim() || 'workspace' })
-  }
-  return { rows }
-}
-
-export async function acceptInvite($: Engine, token: string): Promise<Fetched | null> {
-  return hiveop($, `/workspaces/invites/${encodeURIComponent(token)}/redeem`, { method: 'POST' })
-}
-
-export async function declineInvite($: Engine, inviteId: string): Promise<Fetched | null> {
-  return hiveop($, '/me/invites/decline', { method: 'POST', body: { inviteId } })
-}
-
-export async function listExplore(
-  $: Engine,
-  search: string,
-  offset: number,
-  limit: number,
-): Promise<{ rows: WsRow[]; total: number } | { fail: Fetched | null }> {
-  const q = `limit=${limit}&offset=${offset}${search ? `&search=${encodeURIComponent(search)}` : ''}`
-  const r = await hiveop($, `/workspaces/explore?${q}`)
-  if (!r || !r.ok) return { fail: r }
-  const list = Array.isArray(r.body?.workspaces) ? (r.body!.workspaces as unknown[]) : []
-  const rows = list.map(wsRow).filter((x): x is WsRow => x !== null)
-  return { rows, total: typeof r.body?.total === 'number' ? r.body.total : offset + rows.length }
-}
-
-/** Open join. Resolves with the server's reply; `visiting` when the join is a visit, not a membership. */
-export async function joinWorkspace($: Engine, id: string): Promise<Fetched | null> {
-  return hiveop($, `/workspaces/${encodeURIComponent(id)}/join`, { method: 'POST' })
-}
-
-export async function requestToJoin($: Engine, id: string): Promise<Fetched | null> {
-  return hiveop($, `/workspaces/${encodeURIComponent(id)}/join-requests`, { method: 'POST', body: {} })
-}
-
-export async function listPilots($: Engine, query: string, offset: number, limit: number): Promise<{ rows: PilotRow[] } | { fail: Fetched | null }> {
-  const q = `limit=${limit}&offset=${offset}${query ? `&query=${encodeURIComponent(query)}` : ''}`
-  const r = await hiveop($, `/pilots?${q}`)
-  if (!r || !r.ok) return { fail: r }
-  const list = Array.isArray(r.body?.pilots) ? (r.body!.pilots as Array<Record<string, unknown>>) : []
-  return { rows: list.filter((p) => s(p.wallet) && s(p.displayName)).map((p) => ({ wallet: s(p.wallet), name: s(p.displayName).trim() })) }
-}
-
-export async function followingAmong($: Engine, wallets: string[]): Promise<string[] | null> {
-  if (wallets.length === 0) return []
-  const r = await hiveop($, '/me/following/among', { method: 'POST', body: { wallets } })
-  if (!r || !r.ok || !Array.isArray(r.body?.following)) return null
-  return (r.body!.following as unknown[]).filter((w): w is string => typeof w === 'string')
-}
-
-export async function setFollow($: Engine, wallet: string, on: boolean): Promise<Fetched | null> {
-  return hiveop($, `/users/${encodeURIComponent(wallet)}/follow`, { method: on ? 'POST' : 'DELETE' })
-}
-
-// ── work (hcp-11) ──
-
 export type WorkSummary = { ready: number; inProgress: number; next: { id: string; title: string } | null }
-
-export async function fetchWorkSummary($: Engine, wsId: string): Promise<{ summary: WorkSummary } | { fail: Fetched | null }> {
-  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/work-summary`)
-  if (!r || !r.ok || !r.body) return { fail: r }
-  const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0)
-  const nx = r.body.next as { id?: unknown; title?: unknown } | null | undefined
-  const next = nx && s(nx.id) ? { id: s(nx.id), title: s(nx.title).trim() || 'untitled' } : null
-  return { summary: { ready: n(r.body.ready), inProgress: n(r.body.inProgress), next } }
-}
-
-/** Claim as the person, or as this window's adopted agent when `agent` is given (hcp-17). The server's words come back in `refusal`. */
-export async function claimIssue($: Engine, wsId: string, issueId: string, agent?: string): Promise<Fetched | null> {
-  return hiveop($, `/workspaces/${encodeURIComponent(wsId)}/issues/${encodeURIComponent(issueId)}/claim`, { method: 'POST', agent })
-}
-
-// ── hcp-17: work tools for the model, pinned to the seat ──
 
 export type WorkItem = { id: string; title: string; description: string; priority: string | null }
 
-function toItem(raw: unknown): WorkItem | null {
+export function toItem(raw: unknown): WorkItem | null {
   const o = raw as Record<string, unknown> | null
   if (!o || !s(o.id)) return null
   return {
@@ -379,37 +116,6 @@ function toItem(raw: unknown): WorkItem | null {
     title: s(o.title).trim() || 'untitled',
     description: s(o.description).trim().slice(0, 4000),
     priority: s(o.priority) || null,
-  }
-}
-
-/** Ready items in the seat's workspace, best first. */
-export async function listReady($: Engine, wsId: string, agent: string): Promise<{ items: WorkItem[] } | { fail: Fetched | null }> {
-  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/issues/ready`, { agent })
-  if (!r || !r.ok || !r.body) return { fail: r }
-  const list = Array.isArray(r.body.issues) ? r.body.issues : []
-  return { items: list.map(toItem).filter((i): i is WorkItem => i !== null) }
-}
-
-export async function getIssue($: Engine, wsId: string, issueId: string, agent: string): Promise<WorkItem | null> {
-  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/issues/${encodeURIComponent(issueId)}`, { agent })
-  return r && r.ok && r.body ? toItem(r.body.issue) : null
-}
-
-/** Finish: HiveOp verifies this agent's claimed item (its linked PR) and, on a pass, submits it and claims the next. */
-export async function finishWork($: Engine, wsId: string, agent: string): Promise<Fetched | null> {
-  return hiveop($, `/workspaces/${encodeURIComponent(wsId)}/verification/run`, { method: 'POST', body: {}, agent })
-}
-
-// ── adopted sessions (hcp-15) ──
-
-/** The folder's `origin` remote, or null when it has none. Never logged: it can carry a name. */
-export async function gitRemote($: Engine, cwd: string): Promise<string | null> {
-  try {
-    const r = await $.process.run(['git', 'remote', 'get-url', 'origin'], { cwd })
-    const url = r.stdout.trim()
-    return r.exitCode === 0 && url ? url : null
-  } catch {
-    return null
   }
 }
 
@@ -427,31 +133,10 @@ export function folderKey(cwd: string): string {
 
 export type Matched = { mine: Array<{ id: string; name: string }>; joinable: Array<{ id: string; name: string }> }
 
-export async function matchWorkspaces($: Engine, remote: string): Promise<Matched | null> {
-  const r = await hiveop($, `/me/workspaces/match?remote=${encodeURIComponent(remote)}`)
-  if (!r || !r.ok || !r.body) return null
-  const rows = (v: unknown): Array<{ id: string; name: string }> =>
-    Array.isArray(v)
-      ? (v as Array<Record<string, unknown>>).filter((x) => s(x?.id)).map((x) => ({ id: s(x.id), name: s(x.name).trim() || 'workspace' }))
-      : []
-  return { mine: rows(r.body.mine), joinable: rows(r.body.joinable) }
-}
-
 export type Adopted = { agentId: string; name: string; resumed: boolean }
 
-export async function adoptSession($: Engine, wsId: string, folder: string, session: string): Promise<{ seat: Adopted } | { fail: Fetched | null }> {
-  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/adopted-sessions`, { method: 'POST', body: { folderKey: folder, sessionKey: session } })
-  if (!r || !r.ok || !r.body || !s(r.body.agentId)) return { fail: r }
-  return { seat: { agentId: s(r.body.agentId), name: s(r.body.name).trim() || 'Claude Code', resumed: r.body.resumed === true } }
-}
-
-export async function leaveSession($: Engine, wsId: string, agentId: string): Promise<Fetched | null> {
-  return hiveop($, `/workspaces/${encodeURIComponent(wsId)}/adopted-sessions/${encodeURIComponent(agentId)}/offline`, { method: 'POST' })
-}
-
-// ── cloud agents (hcp-25) ──
-
 const APP = 'https://app.hiveop.io'
+
 export type ApprovalState = 'pending' | 'approved' | 'denied' | 'expired'
 
 /** Where the person approves a filed request. */
@@ -462,69 +147,4 @@ export function approvalUrl(id: string): string {
 /** The workspace in the app, where its agents and terminals are. */
 export function workspaceUrl(wsId: string): string {
   return `${APP}/hive/${encodeURIComponent(wsId)}`
-}
-
-/** File a cloud-run request (create, or wake when `agentId` is given). Nothing starts until the browser approves. */
-export async function fileCloudRun($: Engine, wsId: string, agentId?: string): Promise<{ id: string; expiresAt: string } | { fail: Fetched | null }> {
-  const body: Record<string, string> = { kind: 'cloud_run', workspaceId: wsId }
-  if (agentId) body.agentId = agentId
-  const r = await hiveop($, '/me/plugin-approvals', { method: 'POST', body })
-  const a = r?.body?.approval as { id?: unknown; expiresAt?: unknown } | undefined
-  if (!r || !r.ok || !a || !s(a.id)) return { fail: r }
-  return { id: s(a.id), expiresAt: s(a.expiresAt) }
-}
-
-export async function pollApproval($: Engine, id: string): Promise<{ state: ApprovalState } | { state: 'unreachable' }> {
-  const r = await hiveop($, `/me/plugin-approvals/${encodeURIComponent(id)}`)
-  const st = (r?.body?.approval as { state?: unknown } | undefined)?.state
-  if (r?.ok && (st === 'pending' || st === 'approved' || st === 'denied' || st === 'expired')) return { state: st }
-  return { state: 'unreachable' }
-}
-
-// ── repo access for HiveOp cloud repos (hcp-26) ──
-
-/** Whether this key holds an approved repo grant. `revoked`: the key or grant is gone. Never carries a credential. */
-export async function repoAccess($: Engine): Promise<'granted' | 'none' | 'revoked' | 'unreachable'> {
-  const r = await hiveop($, '/me/repo-access')
-  if (!r || r.status === 0) return 'unreachable'
-  if (r.status === 401 || r.status === 403) return 'revoked'
-  if (!r.ok) return 'unreachable'
-  return r.body?.granted === true ? 'granted' : 'none'
-}
-
-/** File a repo-access request. Nothing is granted until the browser approves. */
-export async function fileRepoAccess($: Engine): Promise<{ id: string; expiresAt: string } | { fail: Fetched | null }> {
-  const r = await hiveop($, '/me/plugin-approvals', { method: 'POST', body: { kind: 'repo_access' } })
-  const a = r?.body?.approval as { id?: unknown; expiresAt?: unknown } | undefined
-  if (!r || !r.ok || !a || !s(a.id)) return { fail: r }
-  return { id: s(a.id), expiresAt: s(a.expiresAt) }
-}
-
-/** The person's own cloud agents in one workspace; null when it could not be read. */
-export async function listCloudAgents($: Engine, wsId: string): Promise<CloudAgent[] | null> {
-  const r = await hiveop($, `/workspaces/${encodeURIComponent(wsId)}/cloud-agents`)
-  if (!r || !r.ok || !Array.isArray(r.body?.agents)) return null
-  return (r.body!.agents as Array<Record<string, unknown>>)
-    .filter((a) => s(a?.id))
-    .map((a) => ({
-      id: s(a.id),
-      name: s(a.name).trim() || 'Claude',
-      state: s(a.state) || 'asleep',
-      creditsPerHour: typeof a.creditsPerHour === 'number' && Number.isFinite(a.creditsPerHour) ? a.creditsPerHour : 0,
-    }))
-}
-
-/** Stopping spend never needs approval. */
-export async function sleepCloudAgent($: Engine, agentId: string): Promise<Fetched | null> {
-  return hiveop($, `/me/cloud-agents/${encodeURIComponent(agentId)}/sleep`, { method: 'POST' })
-}
-
-/** Opens a page in the browser; false when the computer would not. */
-export async function openInBrowser($: Engine, url: string): Promise<boolean> {
-  try {
-    const r = await $.process.run(['open', url])
-    return r.exitCode === 0
-  } catch {
-    return false
-  }
 }
