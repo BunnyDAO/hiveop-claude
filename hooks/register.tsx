@@ -158,11 +158,11 @@ async function hiveop($: Engine, path: string, init: { method?: string; body?: u
   const key = await loadKey($)
   if (!key) return null
   try {
-    const h = headers(key)
-    if (init.agent) h['X-HiveOp-Agent'] = init.agent
+    const hdrs = headers(key)
+    if (init.agent) hdrs['X-HiveOp-Agent'] = init.agent
     const res = await $.http.fetch(`${await apiBase($)}${path}`, {
       method: init.method ?? 'GET',
-      headers: h,
+      headers: hdrs,
       body: init.body === undefined ? undefined : JSON.stringify(init.body),
     })
     const body = parse(res.text)
@@ -978,13 +978,13 @@ async function ensureLoaded($: Engine): Promise<void> {
   }
   if (v.messages.length > 0) return
   const wsId = v.workspace.id
-  const h = await loadHistory($, wsId, v.me)
+  const hist = await loadHistory($, wsId, v.me)
   if ((await read($, chat)).workspace?.id !== wsId) return // moved while this was out
-  if ('r' in h) {
+  if ('r' in hist) {
     await update($, chat, (c) => ({ ...c, status: 'offline' }) as ChatView)
     return
   }
-  await update($, chat, (c) => ({ ...c, status: 'ready', messages: merge(c.messages, h.msgs) }) as ChatView)
+  await update($, chat, (c) => ({ ...c, status: 'ready', messages: merge(c.messages, hist.msgs) }) as ChatView)
 }
 
 // ── hcp-18: who else is online in the viewed room ──
@@ -1063,14 +1063,14 @@ async function openRoom($: Engine, ws: { id: string; name: string }): Promise<vo
   await setNav($, { screen: 'home', note: '' })
   if (!had) await saveTabs($, next)
   if (same) return
-  const h = await loadHistory($, ws.id, before.me)
+  const hist = await loadHistory($, ws.id, before.me)
   if ((await read($, chat)).workspace?.id !== ws.id) return // switched again while this was out
-  if ('r' in h) {
+  if ('r' in hist) {
     await update($, chat, (c) => ({ ...c, status: 'offline' }) as ChatView)
     return
   }
   await update($, chat, (c) => {
-    const msgs = merge([], h.msgs)
+    const msgs = merge([], hist.msgs)
     return { ...c, status: 'ready', messages: msgs, firstNewId: pending > 0 ? (msgs[msgs.length - pending]?.id ?? null) : null } as ChatView
   })
   await loadPresence($)
@@ -1231,9 +1231,9 @@ async function bootstrap($: Engine, mem: ChatMem): Promise<number> {
   if (!head || !head.ok || typeof head.body?.cursor !== 'string') return failed($, mem, head)
   const v = await read($, chat)
   if (v.workspace && v.messages.length === 0) {
-    const h = await loadHistory($, v.workspace.id, v.me)
-    if ('r' in h) return failed($, mem, h.r)
-    await update($, chat, (c) => (c.workspace?.id === v.workspace!.id ? ({ ...c, status: 'ready', messages: merge(c.messages, h.msgs) } as ChatView) : c))
+    const hist = await loadHistory($, v.workspace.id, v.me)
+    if ('r' in hist) return failed($, mem, hist.r)
+    await update($, chat, (c) => (c.workspace?.id === v.workspace!.id ? ({ ...c, status: 'ready', messages: merge(c.messages, hist.msgs) } as ChatView) : c))
   }
   mem.cursor = head.body.cursor
   mem.failures = 0
